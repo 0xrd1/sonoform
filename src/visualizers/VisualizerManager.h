@@ -22,6 +22,8 @@ public:
     int CurrentParticleCount() const;
     const char* CurrentExtraStatusLine() const;
     void SecondaryActionOnCurrent();
+    void TertiaryActionOnCurrent();
+    void AdjustPrimaryOnCurrent(float delta);
     int CurrentIndex() const { return index_; }
     int Count() const { return static_cast<int>(items_.size()); }
 

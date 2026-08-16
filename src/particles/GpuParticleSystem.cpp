@@ -56,7 +56,9 @@ void GpuParticleSystem::Emit(const GpuEmitParams& params, int count) {
     if (count <= 0 || emitProgram_ == 0) return;
 
     GpuVec4 position{ params.position.x, params.position.y, params.position.z, static_cast<float>(params.mode) };
-    GpuVec4 positionJitter{ params.positionJitter.x, params.positionJitter.y, params.positionJitter.z, 0 };
+    // .w carries shellThickness for ShapeSurface mode; unused (0) otherwise.
+    GpuVec4 positionJitter{ params.positionJitter.x, params.positionJitter.y, params.positionJitter.z,
+                             params.shellThickness };
     GpuVec4 velocityBase{ params.velocity.x, params.velocity.y, params.velocity.z, 0 };
     GpuVec4 velocityJitter{ params.velocityJitter.x, params.velocityJitter.y, params.velocityJitter.z, 0 };
 
@@ -85,6 +87,10 @@ void GpuParticleSystem::Emit(const GpuEmitParams& params, int count) {
 
     particleBuffer_.BindBase(gpu_bindings::kParticleBuffer);
     freeListBuffer_.BindBase(gpu_bindings::kFreeListBuffer);
+    // Only needed for ShapeSurface mode, but binding is cheap (a few
+    // uniform sets) and harmless for other modes -- keeps this call site
+    // simple rather than branching on mode here too.
+    if (shapeField_ != nullptr) shapeField_->BindForSampling(emitProgram_);
 
     unsigned int groups = (static_cast<unsigned int>(count) + 63u) / 64u;
     rlComputeShaderDispatch(groups, 1, 1);

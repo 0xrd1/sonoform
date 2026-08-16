@@ -17,17 +17,28 @@ just a spectrum plot.
   based, O(1) emit/kill) driven by a stack of composable `IForce`s:
   gravity wells, drag, vortices, curl-noise turbulence, and constant
   directional forces (`particles/Forces`).
-- **`visualizers/`** contains four independent scenes that wire audio
+- **`visualizers/`** contains five independent scenes that wire audio
   features to particle emission and force parameters:
-  1. **Spectrum Ring** — a circular bar-graph EQ that shoots sparks off
+  1. **Neon Fog** — a dense, lit-from-within fog volume, a fraction of
+     which is attracted onto an SDF shape field (`shapes/ShapeField` +
+     `ProceduralShapeProvider`) via a `ShapeConform` force, cycling
+     through analytic primitives (sphere/box/torus/cylinder/head) so
+     particles visibly migrate to each new shape. Shape attraction is
+     driven by an independent `morphForce_` value (`-`/`=`), *not*
+     audio; audio only drives the core light's color/intensity and
+     triggers lightning. See the class comment in
+     `visualizers/NeonFogVisualizer.h` for the full design rationale,
+     including the extension point for a future mesh-driven shape
+     (`assets/models/` has test meshes but nothing loads them yet).
+  2. **Spectrum Ring** — a circular bar-graph EQ that shoots sparks off
      each bar, with gravity/drag on the sparks and an expanding pulse
      ring on every beat.
-  2. **Particle Galaxy** — a central gravity well with continuously
+  3. **Particle Galaxy** — a central gravity well with continuously
      spawned particles kicked into orbit; bass strengthens gravity,
      treble adds turbulence, beats punch particles outward.
-  3. **Fireworks** — beats launch shells that arc and explode into
+  4. **Fireworks** — beats launch shells that arc and explode into
      radial bursts under gravity + drag.
-  4. **Audio Tunnel** — a particle tunnel flying toward the camera,
+  5. **Audio Tunnel** — a particle tunnel flying toward the camera,
      radius modulated per-angle by the spectrum, color cycling and
      flashing on beats.
 - **`app/App`** owns the window, camera (orbit/zoom via mouse), audio
@@ -72,14 +83,17 @@ The built binary copies `assets/` next to itself automatically.
 
 | Key | Action |
 |---|---|
-| `1`-`4` | Jump to a specific visualizer |
+| `1`-`5` | Jump to a specific visualizer (`1` = Neon Fog) |
 | `Tab` / `→` / `←` | Cycle visualizers |
 | `Space` | Pause/resume |
+| `S` | Cycle shape preset (Neon Fog) |
+| `M` | Toggle shape auto-cycle on/off (Neon Fog) |
+| `-` / `=` | Decrease / increase shape attraction force (Neon Fog) |
 | Right-drag mouse | Orbit camera |
 | Mouse wheel | Zoom |
 | `C` | Toggle camera auto-rotate |
 | `R` | Reset camera |
-| `[` / `]` | Decrease / increase reactivity intensity |
+| `[` / `]` | Decrease / increase reactivity intensity (lighting only) |
 | `F` | Toggle fullscreen |
 | `H` | Toggle HUD |
 | `Esc` | Quit |

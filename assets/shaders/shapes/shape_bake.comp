@@ -10,12 +10,29 @@ uniform vec3 uGridCenter;
 uniform float uGridHalfExtent;
 uniform int uShapeType;
 
-#define SHAPE_SPHERE 0
-#define SHAPE_TORUS  1
-#define SHAPE_HEAD   2
+// Ordered to make each step of the auto-cycle a visually distinct
+// migration (see NeonFogVisualizer::CycleShapePreset). Must match
+// ProceduralShapeType in shapes/ProceduralShapes.h -- there is no
+// compile-time link between this enum and that one, so edit both
+// together.
+#define SHAPE_SPHERE   0
+#define SHAPE_BOX      1
+#define SHAPE_TORUS    2
+#define SHAPE_CYLINDER 3
+#define SHAPE_HEAD     4
 
 float sdSphere(vec3 p, float r) {
     return length(p) - r;
+}
+
+float sdRoundBox(vec3 p, vec3 b, float r) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+float sdCappedCylinder(vec3 p, float h, float r) {
+    vec2 d = abs(vec2(length(p.xz), p.y)) - vec2(r, h);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
 }
 
 float sdTorus(vec3 p, vec2 t) {
@@ -60,7 +77,9 @@ float sdHead(vec3 p) {
 
 float EvalShape(vec3 p) {
     if (uShapeType == SHAPE_SPHERE) return sdSphere(p, 3.0);
+    if (uShapeType == SHAPE_BOX) return sdRoundBox(p, vec3(2.4, 2.4, 2.4), 0.4);
     if (uShapeType == SHAPE_TORUS) return sdTorus(p, vec2(2.5, 1.0));
+    if (uShapeType == SHAPE_CYLINDER) return sdCappedCylinder(p, 2.6, 2.0);
     return sdHead(p);
 }
 

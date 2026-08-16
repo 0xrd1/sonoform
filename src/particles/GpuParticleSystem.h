@@ -21,14 +21,27 @@ enum class GpuEmitMode {
     Sphere = 1,  // velocity = uniform-random direction * random speed in [speedMin, speedMax]
     Orbit = 2,   // position on an annulus around `position`; velocity = tangential orbital speed + jitter
                  // (replaces GalaxyVisualizer's old per-particle CPU orbit-velocity loop)
+    ShapeSurface = 3, // position = a candidate point in the jitter box, projected onto the
+                      // system's bound ShapeField via one gradient (Newton) step, +/- shellThickness
+                      // along the surface normal. Requires SetShapeField() to have been called; see
+                      // GpuEmitParams::shellThickness. Puts freshly-spawned particles on/near the
+                      // *current* shape immediately instead of waiting for a ShapeConform force to
+                      // drag them there over several seconds -- the professional-VFX pattern of
+                      // biasing birth position by an SDF (cf. Houdini POPs-in-context / Niagara's
+                      // SDF-driven "Shape Location").
 };
 
 // Mirrors the old CPU EmitParams (src/particles/ParticleSystem.h, now
 // deleted) plus the explicit `mode` above.
 struct GpuEmitParams {
     Vector3 position{ 0, 0, 0 };        // base position / Orbit mode's center
-    Vector3 positionJitter{ 0, 0, 0 };  // Box/Sphere: box half-extents. Orbit: x=radiusMin,y=radiusMax,z=heightJitter
+    Vector3 positionJitter{ 0, 0, 0 };  // Box/Sphere/ShapeSurface: box half-extents (candidate region
+                                         // for ShapeSurface, projected onto the field afterward).
+                                         // Orbit: x=radiusMin,y=radiusMax,z=heightJitter
     GpuEmitMode mode = GpuEmitMode::Box;
+    float shellThickness = 0.0f;        // ShapeSurface mode only: +/- random offset along the
+                                         // surface normal after projection, so the birth shell has
+                                         // a little softness instead of being a razor-thin surface.
 
     Vector3 velocity{ 0, 0, 0 };        // Box mode
     Vector3 velocityJitter{ 0, 0, 0 };  // Box mode

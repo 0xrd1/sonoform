@@ -29,7 +29,7 @@ private:
     Camera3D camera_{};
     float camYaw_ = 0.0f;
     float camPitch_ = 0.35f;
-    float camDistance_ = 18.0f;
+    float camDistance_ = 20.0f;
     bool autoRotate_ = true;
 
     Music music_{};

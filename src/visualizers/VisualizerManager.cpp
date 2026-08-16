@@ -50,3 +50,13 @@ void VisualizerManager::SecondaryActionOnCurrent() {
     if (items_.empty()) return;
     items_[static_cast<size_t>(index_)]->SecondaryAction();
 }
+
+void VisualizerManager::TertiaryActionOnCurrent() {
+    if (items_.empty()) return;
+    items_[static_cast<size_t>(index_)]->TertiaryAction();
+}
+
+void VisualizerManager::AdjustPrimaryOnCurrent(float delta) {
+    if (items_.empty()) return;
+    items_[static_cast<size_t>(index_)]->AdjustPrimary(delta);
+}

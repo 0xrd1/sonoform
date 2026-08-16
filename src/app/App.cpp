@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -22,12 +23,43 @@ bool HasSupportedAudioExt(const fs::path& p) {
     for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".flac";
 }
+
+// Temporarily off: work is focused entirely on the Neon Fog particle/
+// shape-morph pipeline (performance + legibility) for now, and audio
+// playback was producing pops/clicks that were a distraction during that
+// work, independent of whatever is causing them. Flip back on (and
+// restore the other Add() calls below) once that's done. With this off,
+// App::musicLoaded_ stays false, so Run() never calls UpdateMusicStream/
+// AudioAnalyzer::Update -- NeonFogVisualizer's audio.* calls all read
+// harmless zero-initialized defaults (see AudioAnalyzer.h), so lighting
+// just stays at its resting color/intensity instead of erroring.
+constexpr bool kAudioEnabled = false;
 }
 
 bool App::Init(const std::string& audioPathArg) {
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
-    InitWindow(1280, 720, "Particle Audio Visualizer");
+    InitWindow(1920, 1080, "Particle Audio Visualizer");
     SetTargetFPS(60);
+
+    // The requested 1920x1080 is a target aspect ratio, not a guarantee --
+    // on a 1080p (or smaller) desktop that would exactly fill or exceed the
+    // work area once the title bar/taskbar are accounted for. Clamp to 90%
+    // of the current monitor's size (keeping the 16:9 aspect) and center
+    // the window so the whole scene is always visible without the user
+    // having to manually resize/reposition on first launch.
+    {
+        int monitor = GetCurrentMonitor();
+        int maxW = static_cast<int>(GetMonitorWidth(monitor) * 0.9f);
+        int maxH = static_cast<int>(GetMonitorHeight(monitor) * 0.9f);
+        int w = 1920, h = 1080;
+        if (w > maxW || h > maxH) {
+            float scale = std::min(static_cast<float>(maxW) / w, static_cast<float>(maxH) / h);
+            w = static_cast<int>(w * scale);
+            h = static_cast<int>(h * scale);
+        }
+        SetWindowSize(w, h);
+        SetWindowPosition((GetMonitorWidth(monitor) - w) / 2, (GetMonitorHeight(monitor) - h) / 2);
+    }
 
     // This engine simulates and renders all particles on the GPU via
     // compute shaders and SSBOs; there is no CPU particle fallback. Fail
@@ -37,7 +69,7 @@ bool App::Init(const std::string& audioPathArg) {
         return false;
     }
 
-    InitAudioDevice();
+    if (kAudioEnabled) InitAudioDevice();
 
     // ParticleRenderer's constructor issues real GL calls (compiles the
     // render shader, allocates a VAO), so it can only be constructed here,
@@ -53,13 +85,15 @@ bool App::Init(const std::string& audioPathArg) {
     accentTexture_ = LoadTextureFromImage(glow);
     UnloadImage(glow);
 
-    LoadAudio(audioPathArg);
+    if (kAudioEnabled) LoadAudio(audioPathArg);
 
-    visualizers_.Add(std::make_unique<SpectrumRingVisualizer>(), shaderLibrary_, *particleRenderer_);
-    visualizers_.Add(std::make_unique<GalaxyVisualizer>(), shaderLibrary_, *particleRenderer_);
-    visualizers_.Add(std::make_unique<FireworksVisualizer>(), shaderLibrary_, *particleRenderer_);
-    visualizers_.Add(std::make_unique<TunnelVisualizer>(), shaderLibrary_, *particleRenderer_);
+    // Only Neon Fog while its particle/shape-morph pipeline is the sole
+    // focus -- see kAudioEnabled. Restore these once that work lands.
     visualizers_.Add(std::make_unique<NeonFogVisualizer>(), shaderLibrary_, *particleRenderer_);
+    // visualizers_.Add(std::make_unique<SpectrumRingVisualizer>(), shaderLibrary_, *particleRenderer_);
+    // visualizers_.Add(std::make_unique<GalaxyVisualizer>(), shaderLibrary_, *particleRenderer_);
+    // visualizers_.Add(std::make_unique<FireworksVisualizer>(), shaderLibrary_, *particleRenderer_);
+    // visualizers_.Add(std::make_unique<TunnelVisualizer>(), shaderLibrary_, *particleRenderer_);
 
     camera_.up = { 0, 1, 0 };
     camera_.fovy = 45.0f;
@@ -67,7 +101,7 @@ bool App::Init(const std::string& audioPathArg) {
     camera_.target = { 0, 2.0f, 0 };
     camYaw_ = 0.0f;
     camPitch_ = 0.35f;
-    camDistance_ = 18.0f;
+    camDistance_ = 20.0f;
 
     return true;
 }
@@ -155,6 +189,9 @@ void App::HandleInput(float dt) {
     if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_TAB)) visualizers_.Next();
     if (IsKeyPressed(KEY_LEFT)) visualizers_.Prev();
     if (IsKeyPressed(KEY_S)) visualizers_.SecondaryActionOnCurrent();
+    if (IsKeyPressed(KEY_M)) visualizers_.TertiaryActionOnCurrent();
+    if (IsKeyDown(KEY_MINUS)) visualizers_.AdjustPrimaryOnCurrent(-dt * 0.6f);
+    if (IsKeyDown(KEY_EQUAL)) visualizers_.AdjustPrimaryOnCurrent(dt * 0.6f);
 
     if (IsKeyPressed(KEY_SPACE) && musicLoaded_) {
         paused_ = !paused_;
@@ -166,7 +203,7 @@ void App::HandleInput(float dt) {
     if (IsKeyPressed(KEY_R)) {
         camYaw_ = 0.0f;
         camPitch_ = 0.35f;
-        camDistance_ = 18.0f;
+        camDistance_ = 20.0f;
     }
     if (IsKeyPressed(KEY_F)) ToggleFullscreen();
     if (IsKeyPressed(KEY_H)) showHud_ = !showHud_;
@@ -255,9 +292,9 @@ void App::DrawHUD() const {
     if (paused_) { DrawText("PAUSED", pad, y, 18, YELLOW); y += 22; }
 
     const char* controls =
-        "1-5: switch visualizer   Tab/Right/Left: cycle   Space: pause   S: cycle shape (Neon Fog)\n"
+        "1-5: switch visualizer   Tab/Right/Left: cycle   Space: pause   S: cycle shape   M: toggle auto-cycle (Neon Fog)\n"
         "Right-drag: orbit camera   Wheel: zoom   C: toggle auto-rotate   R: reset camera\n"
-        "[ / ]: intensity   F: fullscreen   H: toggle HUD   Esc: quit";
+        "[ / ]: light intensity   - / =: morph force (Neon Fog)   F: fullscreen   H: toggle HUD   Esc: quit";
     DrawText(controls, pad, GetScreenHeight() - 70, 16, Fade(RAYWHITE, 0.75f));
 }
 

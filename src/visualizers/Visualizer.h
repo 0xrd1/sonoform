@@ -63,4 +63,14 @@ public:
     // Optional visualizer-specific action bound to a dedicated key (e.g.
     // cycling a shape preset). Default no-op.
     virtual void SecondaryAction() {}
+
+    // Optional second visualizer-specific toggle (e.g. Neon Fog's
+    // shape-auto-cycle on/off). Default no-op.
+    virtual void TertiaryAction() {}
+
+    // Optional continuous visualizer-specific parameter nudge, e.g. a
+    // held key raising/lowering some independent driver value. `delta`
+    // carries sign and magnitude (already scaled by dt by the caller).
+    // Default no-op.
+    virtual void AdjustPrimary(float /*delta*/) {}
 };

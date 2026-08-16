@@ -1,11 +1,15 @@
 #pragma once
 #include "ShapeProvider.h"
 
-// Must match SHAPE_SPHERE/SHAPE_TORUS/SHAPE_HEAD in shape_bake.comp.
+// Must match SHAPE_SPHERE/SHAPE_BOX/SHAPE_TORUS/SHAPE_CYLINDER/SHAPE_HEAD
+// in shape_bake.comp. Ordered to make each step of the auto-cycle (see
+// NeonFogVisualizer::CycleShapePreset) a visually distinct migration.
 enum class ProceduralShapeType {
     Sphere = 0,
-    Torus = 1,
-    Head = 2,
+    Box = 1,
+    Torus = 2,
+    Cylinder = 3,
+    Head = 4,
 };
 
 // Bakes one of a small set of analytic SDFs into a ShapeField via the

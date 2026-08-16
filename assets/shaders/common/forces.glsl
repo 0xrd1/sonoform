@@ -19,7 +19,7 @@
 //   TURBULENCE     (a unused)                b.x = strength   b.y = scale
 //   DIRECTIONAL    a.xyz = direction         b.x = strength
 //   SHAPE_CONFORM  b.x = attraction strength b.y = curl-flow strength  b.z = morphStrength
-//                  (see ApplyShapeConform in shapes/shape_conform.glsl). Every
+//                  b.w = recruit fraction (see ApplyShapeConform in shapes/shape_conform.glsl). Every
 //                  particle system's sim shader can express this force, but
 //                  only ones that actually add a SHAPE_CONFORM ForceDesc (the
 //                  Neon Fog visualizer) ever sample the ShapeField buffer --
@@ -69,7 +69,7 @@ vec3 ApplyForces(vec3 pos, inout vec3 vel, float dt, float time, uint forceCount
         } else if (type == FORCE_DIRECTIONAL) {
             accel += normalize(f.a.xyz) * f.b.x;
         } else if (type == FORCE_SHAPE_CONFORM) {
-            accel += ApplyShapeConform(pos, f.b.x, f.b.y, f.b.z, time, particleSeed);
+            accel += ApplyShapeConform(pos, f.b.x, f.b.y, f.b.z, f.b.w, time, particleSeed);
         }
     }
 

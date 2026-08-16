@@ -34,9 +34,13 @@
 //   - LightningSystem: fractal bolts that fire on intense music, drawn
 //     additively (bolts genuinely are light-emitting) and contributing
 //     their own transient lights alongside the core light.
-// morphStrength (how strongly the recruited fraction is pulled into the
-// current shape) and the core light's color/intensity are both audio-
-// driven, so structure and color both pulse with musical swells.
+// Audio drives lighting only: the core light's color/intensity and
+// lightning both pulse with musical swells. Shape attraction is
+// deliberately independent of audio -- morphStrength eases toward
+// morphForce_, a standalone driver (user-tunable via '-'/'=', see
+// AdjustPrimary) that has nothing to do with the music, so the
+// shape-conform pipeline can be proven out (and later driven by other
+// external forces, e.g. wind/turbulence) without audio in the loop.
 class NeonFogVisualizer : public Visualizer {
 public:
     void Init(ShaderLibrary& shaders, ParticleRenderer& renderer) override;
@@ -47,6 +51,8 @@ public:
 
     const char* ExtraStatusLine() const override;
     void SecondaryAction() override { CycleShapePreset(); } // bound to a dedicated key in App
+    void TertiaryAction() override { autoCycle_ = !autoCycle_; } // bound to 'M' in App
+    void AdjustPrimary(float delta) override; // bound to '-'/'=' in App: nudges morphForce_
 
 private:
     void CycleShapePreset();
@@ -61,9 +67,21 @@ private:
     int shapeConformForceIndex_ = -1;
 
     Vector3 fieldCenter_{ 0, 2.0f, 0 };
-    bool shapeEnabled_ = true;
-    float morphStrength_ = 0.0f; // smoothed toward morphTarget_ each frame
+    float morphStrength_ = 0.0f; // smoothed toward morphTarget_ (== morphForce_) each frame
     float morphTarget_ = 0.0f;
+
+    // The independent driver behind shape attraction -- deliberately not
+    // derived from audio (see the class comment: audio drives lighting
+    // only). User-tunable via '-'/'=' (down to 0, which dissolves all
+    // structure back into uniform fog) so the attraction pipeline is
+    // demonstrably decoupled from the music.
+    float morphForce_ = 1.0f;
+
+    // Auto-advances through shape presets on a fixed timer so the morph
+    // is visible without user input; 'S' can also force the next shape
+    // immediately, and 'M' toggles this on/off.
+    bool autoCycle_ = true;
+    float shapeTimer_ = 0.0f;
 
     float spawnAccumulator_ = 0.0f;
     float beatFlash_ = 0.0f;

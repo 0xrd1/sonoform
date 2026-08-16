@@ -10,30 +10,28 @@
 #include "shape_field_sample.glsl"
 #include "noise.glsl"
 
-// Fraction of particles that ever respond to shape conforming, regardless
-// of morphStrength. Without this, morphStrength=1 pulls literally every
-// particle onto the (comparatively small) shape surface at once, which
-// oversaturates into a solid blob under additive blending and reads as a
-// rigid point cloud -- exactly what the VFX technique in the module
-// comment above is meant to avoid. Recruiting only a subset keeps the
-// rest as permanent ambient fog, so the shape is always suggested by a
-// portion of the particles, never all of them.
-const float kShapeRecruitFraction = 0.35;
-
 // b.x = attraction strength, b.y = curl-flow strength, b.z = morphStrength
 // (0 = fully ignore the field -- particles behave as free-floating fog --
-// 1 = fully pulled toward/along the shape, for the ~35% of particles
-// recruited below). Only a ForceDesc of type FORCE_SHAPE_CONFORM invokes
-// this (see forces.glsl); other particle systems never call it and never
-// touch the ShapeField buffer.
-vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, float morphStrength, float time, float particleSeed) {
+// 1 = fully pulled toward/along the shape, for the recruited fraction of
+// particles below), b.w = recruit fraction: the share of particles that
+// ever respond to shape conforming, regardless of morphStrength. Without
+// this, morphStrength=1 pulls literally every particle onto the
+// (comparatively small) shape surface at once, which oversaturates into a
+// solid blob and reads as a rigid point cloud -- exactly what the VFX
+// technique in the module comment above is meant to avoid. Recruiting only
+// a subset keeps the rest as permanent ambient fog, so the shape is always
+// suggested by a portion of the particles, never all of them. Only a
+// ForceDesc of type FORCE_SHAPE_CONFORM invokes this (see forces.glsl);
+// other particle systems never call it and never touch the ShapeField
+// buffer.
+vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, float morphStrength, float recruitFraction, float time, float particleSeed) {
     if (morphStrength <= 0.0001) return vec3(0.0);
 
     // Deterministic per-particle recruitment from the particle's own rng
     // seed (stable for that particle's whole lifetime -- it doesn't
     // flicker between recruited/not from frame to frame).
     float recruit = fract(particleSeed * 0.6180339887);
-    if (recruit > kShapeRecruitFraction) return vec3(0.0);
+    if (recruit > recruitFraction) return vec3(0.0);
 
     vec4 fieldSample = SampleShapeField(pos);
     vec3 gradient = fieldSample.xyz;

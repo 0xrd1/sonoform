@@ -6,54 +6,97 @@
 #include <cmath>
 
 namespace {
-// GPU particle systems comfortably run into the hundreds of thousands to
-// millions on modern hardware (this is a from-scratch compute pipeline,
-// not the CPU-particle-era constraint that made low counts necessary);
-// capacity is set close to the target steady-state population rather
-// than wildly over-provisioned, since every particle system draws its
-// full capacity as instances every frame (dead ones collapse to
-// degenerate triangles in-shader -- see particle_render.vert -- so
-// capacity, not just alive count, drives render cost).
-constexpr int kFogCapacity = 600000;
+// Particle count is sized for the SDF-biased-spawn design below, not for
+// raw visual mass: every alive particle pays for a full force evaluation
+// (gravity + turbulence + drag + shape-conform, the latter two each doing
+// a curl-noise sample) every frame in particle_sim.comp, so count is the
+// second-biggest lever on GPU cost after the noise-derivative optimization
+// in noise.glsl. Because particles now spawn already on/near the current
+// shape's surface (see kShapeCandidateHalfExtent) instead of filling a
+// large ambient volume, far fewer are needed for a dense, legible result
+// than the old "big diffuse box" approach required.
+constexpr int kFogCapacity = 150000;
 constexpr int kShapeGridResolution = 40;
-constexpr float kShapeGridHalfExtent = 4.5f;
+// Grid half-extent must comfortably exceed the largest shape's radius
+// (~3.5, the torus) plus the emission candidate box below it, or samples
+// land outside the field and hit clamped edge voxels instead of the real
+// surface -- see shape_field_sample.glsl's FetchShapeVoxel clamp.
+constexpr float kShapeGridHalfExtent = 6.0f;
+
+// Loose containment only: keeps particles that have shed off the shape
+// (see kShapeRecruitFraction) from drifting away indefinitely before they
+// die. Must stay well below ShapeConform's attraction (kShapeAttraction)
+// or gravity would compete with it for the recruited fraction.
+constexpr float kGravityStrength = 0.35f;
+constexpr float kGravitySoftening = 3.5f;
+
+constexpr float kTurbulenceStrength = 0.3f;
+constexpr float kTurbulenceScale = 0.08f;
+
+// Moderate: particles already spawn on the surface (see Update's emission
+// block), so this force's job in steady state is mostly *maintaining*
+// that position against turbulence/gravity and pulling still-alive
+// particles across to a new shape when one is selected -- not doing the
+// initial recruiting work the old design relied on it for.
+constexpr float kShapeAttraction = 1.4f;
+constexpr float kShapeCurl = 0.6f;
+// The fraction of particles that stay locked to the shape for their whole
+// life; the rest shed off it under gravity/turbulence alone once spawned,
+// reading as haze drifting away from a solid core -- see the emission
+// comment in Update().
+constexpr float kShapeRecruitFraction = 0.65f;
+
+// How far out (from the shape's center) candidate spawn points are chosen
+// before being projected onto the surface -- see GpuEmitMode::ShapeSurface.
+// Kept within kShapeGridHalfExtent with margin (worst-case box corner is
+// ~1.73x this) so projection never samples a clamped edge voxel.
+constexpr float kShapeCandidateHalfExtent = 3.5f;
+
+// How long a shape holds before auto-cycling to the next one.
+constexpr float kShapeCycleSeconds = 6.0f;
 }
 
 void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer) {
     fog_ = std::make_unique<GpuParticleSystem>(shaders, renderer, kFogCapacity);
 
     shapeField_ = std::make_unique<ShapeField>(shaders, kShapeGridResolution, fieldCenter_, kShapeGridHalfExtent);
-    shapeProvider_ = std::make_unique<ProceduralShapeProvider>(ProceduralShapeType::Head);
+    shapeProvider_ = std::make_unique<ProceduralShapeProvider>(ProceduralShapeType::Sphere);
     shapeProvider_->BakeInto(*shapeField_, 0.0f);
     fog_->SetShapeField(shapeField_.get());
 
-    gravityForceIndex_ = fog_->AddForce(gpu_force::GravityWell(fieldCenter_, 2.0f, 2.5f));
-    turbulenceForceIndex_ = fog_->AddForce(gpu_force::Turbulence(0.4f, 0.08f));
-    fog_->AddForce(gpu_force::Drag(0.45f));
-    shapeConformForceIndex_ = fog_->AddForce(gpu_force::ShapeConform(1.1f, 0.7f, 0.0f));
+    gravityForceIndex_ = fog_->AddForce(gpu_force::GravityWell(fieldCenter_, kGravityStrength, kGravitySoftening));
+    turbulenceForceIndex_ = fog_->AddForce(gpu_force::Turbulence(kTurbulenceStrength, kTurbulenceScale));
+    fog_->AddForce(gpu_force::Drag(0.8f));
+    shapeConformForceIndex_ = fog_->AddForce(
+        gpu_force::ShapeConform(kShapeAttraction, kShapeCurl, 0.0f, kShapeRecruitFraction));
 }
 
 void NeonFogVisualizer::Update(const FrameContext& frame) {
-    // Structure emerges on musical swells (bass + overall energy) and
-    // eases toward its target so shape changes read as organic
-    // emergence/dissolution, not a snap.
-    morphTarget_ = shapeEnabled_
-        ? Clamp((frame.audio.Energy() * 3.0f + frame.audio.Bass() * 1.5f) * frame.intensity, 0.0f, 1.0f)
-        : 0.0f;
+    // Shape attraction is driven purely by morphForce_ -- an independent
+    // value the user controls directly (see AdjustPrimary), not derived
+    // from audio in any way. Eased toward its target so shape changes
+    // still read as organic emergence/dissolution rather than a snap.
+    morphTarget_ = Clamp(morphForce_, 0.0f, 1.5f);
     morphStrength_ += (morphTarget_ - morphStrength_) * std::min(1.0f, frame.dt * 1.5f);
 
     fog_->SetForce(shapeConformForceIndex_,
-        gpu_force::ShapeConform(1.1f * frame.intensity, 0.7f, morphStrength_));
+        gpu_force::ShapeConform(kShapeAttraction, kShapeCurl, morphStrength_, kShapeRecruitFraction));
 
-    // Kept modest and with generous softening: strong gravity concentrates
-    // too much mass right at the core light's position, which -- combined
-    // with that light's intensity -- is exactly the recipe for the fog's
-    // brightest point blowing out to solid white.
-    float gravityStrength = 1.0f + frame.audio.Bass() * 1.5f * frame.intensity;
-    fog_->SetForce(gravityForceIndex_, gpu_force::GravityWell(fieldCenter_, gravityStrength, 3.5f));
+    // Gravity/turbulence are constant now too -- see the class comment:
+    // audio drives lighting/color only, motion is independent of it.
+    fog_->SetForce(gravityForceIndex_, gpu_force::GravityWell(fieldCenter_, kGravityStrength, kGravitySoftening));
+    fog_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(kTurbulenceStrength, kTurbulenceScale));
 
-    float turbStrength = 0.3f + frame.audio.Treble() * 1.8f * frame.intensity;
-    fog_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(turbStrength, 0.08f));
+    // Auto-advance through shape presets on a fixed timer so the morph is
+    // visible without any input; 'S'/'M' (SecondaryAction/TertiaryAction)
+    // still let the user force a change or stop the timer.
+    if (autoCycle_) {
+        shapeTimer_ += frame.dt;
+        if (shapeTimer_ >= kShapeCycleSeconds) {
+            shapeTimer_ = 0.0f;
+            CycleShapePreset();
+        }
+    }
 
     if (frame.audio.BeatTriggered()) beatFlash_ = 1.0f;
     beatFlash_ = std::max(0.0f, beatFlash_ - frame.dt * 2.0f);
@@ -67,19 +110,34 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), 0.75f, 1.0f);
     coreLightIntensity_ = (1.5f + frame.audio.Energy() * 4.0f + beatFlash_ * 2.5f) * frame.intensity;
 
-    // Continuous ambient emission, distributed through a volume around
-    // the shape's center so it reads as a cloud rather than a point
-    // source, replenishing particles as they die to keep the fog dense.
-    float spawnRate = 60000.0f + frame.audio.Energy() * 60000.0f * frame.intensity;
-    spawnAccumulator_ += frame.dt * spawnRate;
+    // Emission: every particle is born already on (or just off) the
+    // *current* shape's surface via GpuEmitMode::ShapeSurface -- a single
+    // Newton/gradient step against the bound ShapeField (see
+    // particle_emit.comp), not a slow drift-in from a diffuse spawn
+    // volume. This is the standard professional-VFX pattern for
+    // "structure that reacts instantly": bias birth position by the SDF
+    // instead of relying purely on a force to drag particles there over
+    // several seconds. It also makes a shape change (CycleShapePreset)
+    // read immediately -- freshly spawned particles appear on the *new*
+    // shape within a fraction of a second, layered with the still-alive
+    // recruited particles from before, which the ShapeConform force
+    // visibly migrates from the old surface to the new one (see the
+    // class comment: that migration is the actual "attraction" this
+    // pipeline exists to prove). Constant/not audio-driven -- see the
+    // class comment. Paced so steady-state population (spawnRate * life)
+    // sits well under kFogCapacity: 18000 * 6 = 108000 of 150000.
+    constexpr float kSpawnRate = 18000.0f;
+    spawnAccumulator_ += frame.dt * kSpawnRate;
     int spawnCount = static_cast<int>(spawnAccumulator_);
     if (spawnCount > 0) {
         spawnAccumulator_ -= static_cast<float>(spawnCount);
 
         GpuEmitParams ep;
-        ep.mode = GpuEmitMode::Box;
+        ep.mode = GpuEmitMode::ShapeSurface;
         ep.position = fieldCenter_;
-        ep.positionJitter = { 5.5f, 5.5f, 5.5f };
+        ep.positionJitter = { kShapeCandidateHalfExtent, kShapeCandidateHalfExtent, kShapeCandidateHalfExtent };
+        // Soft skin, not a razor-thin shell -- see particle_emit.comp.
+        ep.shellThickness = 0.2f;
         // Slow, gentle drift -- real fog moves like a gas, not a spray.
         ep.velocity = { 0, 0.08f, 0 };
         ep.velocityJitter = { 0.12f, 0.12f, 0.12f };
@@ -92,20 +150,20 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
         ep.colorA = ColorFromHSV(275.0f, 0.12f, 0.16f);
         ep.colorB = ColorFromHSV(190.0f, 0.12f, 0.14f);
 
-        // Large, soft, overlapping sprites read as an actual volume
-        // under alpha blending (which naturally caps brightness as
-        // layers stack, unlike additive) -- favoring size over raw count
-        // for density is the standard real-time-VFX lever for this look.
-        ep.size = 1.3f + frame.audio.Energy() * 0.5f * frame.intensity;
-        ep.sizeJitter = 0.5f;
-        ep.life = 7.0f;
-        ep.lifeJitter = 2.5f;
+        // Small: with particles already concentrated on the surface (not
+        // spread through a large ambient volume), a large sprite radius
+        // is what turns a legible silhouette into a soft blob. Small,
+        // dense, overlapping sprites read as a detailed structured
+        // surface instead under alpha blending.
+        ep.size = 0.35f;
+        ep.sizeJitter = 0.15f;
+        // Short enough for fast turnover (a shape change reads within
+        // roughly one lifetime) but long enough for shed (unrecruited)
+        // particles to visibly drift as haze before dying.
+        ep.life = 6.0f;
+        ep.lifeJitter = 2.0f;
 
         fog_->Emit(ep, spawnCount);
-    }
-
-    if (frame.audio.BeatTriggered()) {
-        fog_->ApplyRadialImpulse(fieldCenter_, 2.0f * frame.intensity * (0.5f + frame.audio.BeatIntensity()), 8.0f);
     }
 
     // Lightning: strong beats fire a bolt; a short cooldown keeps a burst
@@ -148,29 +206,44 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     EndBlendMode();
 }
 
-const char* NeonFogVisualizer::ExtraStatusLine() const {
-    if (!shapeEnabled_) return TextFormat("Shape: off (pure fog)  Morph: %.0f%%", morphStrength_ * 100.0f);
-
-    const char* name = "?";
-    switch (shapeProvider_->Type()) {
-        case ProceduralShapeType::Sphere: name = "Sphere"; break;
-        case ProceduralShapeType::Torus: name = "Torus"; break;
-        case ProceduralShapeType::Head: name = "Head"; break;
+namespace {
+const char* ShapeName(ProceduralShapeType type) {
+    switch (type) {
+        case ProceduralShapeType::Sphere: return "Sphere";
+        case ProceduralShapeType::Box: return "Box";
+        case ProceduralShapeType::Torus: return "Torus";
+        case ProceduralShapeType::Cylinder: return "Cylinder";
+        case ProceduralShapeType::Head: return "Head";
     }
-    return TextFormat("Shape: %s (S to cycle)  Morph: %.0f%%", name, morphStrength_ * 100.0f);
+    return "?";
+}
+}
+
+const char* NeonFogVisualizer::ExtraStatusLine() const {
+    float secondsToNext = autoCycle_ ? std::max(0.0f, kShapeCycleSeconds - shapeTimer_) : 0.0f;
+    return TextFormat(
+        "Shape: %s (S to cycle)  Morph force: %.2f (-/=)  Morph: %.0f%%  Auto-cycle: %s (M)%s",
+        ShapeName(shapeProvider_->Type()), morphForce_, morphStrength_ * 100.0f,
+        autoCycle_ ? "on" : "off",
+        autoCycle_ ? TextFormat("  Next in: %.1fs", secondsToNext) : "");
 }
 
 void NeonFogVisualizer::CycleShapePreset() {
-    if (!shapeEnabled_) {
-        shapeEnabled_ = true;
-        shapeProvider_->SetType(ProceduralShapeType::Sphere);
-    } else {
-        switch (shapeProvider_->Type()) {
-            case ProceduralShapeType::Sphere: shapeProvider_->SetType(ProceduralShapeType::Torus); break;
-            case ProceduralShapeType::Torus: shapeProvider_->SetType(ProceduralShapeType::Head); break;
-            case ProceduralShapeType::Head: shapeEnabled_ = false; break;
-        }
+    // Walks Sphere -> Box -> Torus -> Cylinder -> Head -> Sphere ...
+    // Never disables the shape entirely -- to see pure ambient fog, drive
+    // morphForce_ to 0 via '-' instead (see AdjustPrimary); 'M' separately
+    // toggles whether this cycle advances on its own.
+    switch (shapeProvider_->Type()) {
+        case ProceduralShapeType::Sphere: shapeProvider_->SetType(ProceduralShapeType::Box); break;
+        case ProceduralShapeType::Box: shapeProvider_->SetType(ProceduralShapeType::Torus); break;
+        case ProceduralShapeType::Torus: shapeProvider_->SetType(ProceduralShapeType::Cylinder); break;
+        case ProceduralShapeType::Cylinder: shapeProvider_->SetType(ProceduralShapeType::Head); break;
+        case ProceduralShapeType::Head: shapeProvider_->SetType(ProceduralShapeType::Sphere); break;
     }
 
-    if (shapeEnabled_) shapeProvider_->BakeInto(*shapeField_, 0.0f);
+    shapeProvider_->BakeInto(*shapeField_, 0.0f);
+}
+
+void NeonFogVisualizer::AdjustPrimary(float delta) {
+    morphForce_ = Clamp(morphForce_ + delta, 0.0f, 1.5f);
 }

@@ -3,6 +3,7 @@ layout(local_size_x = 64) in;
 
 #include "../common/particle_types.glsl"
 #include "../common/random.glsl"
+#include "../shapes/shape_field_sample.glsl"
 
 // Mirrors the old CPU EmitParams (src/particles/ParticleSystem.h) plus one
 // addition: `mode` selects how position/velocity are randomized. The CPU
@@ -12,9 +13,11 @@ layout(local_size_x = 64) in;
 // emit dispatch has to express the same three patterns explicitly, but
 // gets to do all N particles' independent randomness in parallel instead
 // of N separate CPU Emit(..., 1) calls.
-#define EMIT_MODE_BOX    0  // velocity = base + box jitter
-#define EMIT_MODE_SPHERE 1  // velocity = uniform-random direction * [speedMin, speedMax]
-#define EMIT_MODE_ORBIT  2  // position on an annulus around uPosition; velocity = tangential orbital speed + jitter
+#define EMIT_MODE_BOX           0  // velocity = base + box jitter
+#define EMIT_MODE_SPHERE        1  // velocity = uniform-random direction * [speedMin, speedMax]
+#define EMIT_MODE_ORBIT         2  // position on an annulus around uPosition; velocity = tangential orbital speed + jitter
+#define EMIT_MODE_SHAPE_SURFACE 3  // position = candidate point in the jitter box, projected onto
+                                    // the bound ShapeField via one gradient step; see GpuEmitMode::ShapeSurface.
 
 uniform vec4 uPosition;        // xyz = base position, w = mode
 uniform vec4 uPositionJitter;  // xyz = box half-extents (box/sphere), OR x=radiusMin,y=radiusMax,z=heightJitter (orbit)
@@ -79,6 +82,21 @@ void main() {
         // CPU per particle.
         float radiusSpan = max(0.001, uPositionJitter.y - uPositionJitter.x);
         colorT = clamp((radius - uPositionJitter.x) / radiusSpan, 0.0, 1.0);
+    } else if (mode == EMIT_MODE_SHAPE_SURFACE) {
+        // One Newton/gradient-descent step toward the SDF's zero surface:
+        // for an exact signed distance field (true of every analytic
+        // primitive this engine bakes -- see shape_bake.comp) this lands
+        // exactly on the surface regardless of the starting distance, since
+        // walking `dist` units back along the (unit-length) gradient is by
+        // definition how far the nearest surface point is.
+        pos = uPosition.xyz + RandBox(rng, uPositionJitter.xyz);
+        vec4 fieldSample = SampleShapeField(pos);
+        pos -= fieldSample.xyz * fieldSample.w;
+        // Shell thickness (uPositionJitter.w): a small random nudge back
+        // along the same normal so the birth shell reads as a soft skin of
+        // fog rather than a razor-thin, perfectly rigid surface.
+        pos += fieldSample.xyz * RandRange(rng, -uPositionJitter.w, uPositionJitter.w);
+        vel = uVelocityBase.xyz + RandBox(rng, uVelocityJitter.xyz);
     } else {
         pos = uPosition.xyz + RandBox(rng, uPositionJitter.xyz);
         vel = uVelocityBase.xyz + RandBox(rng, uVelocityJitter.xyz);
