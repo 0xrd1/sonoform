@@ -7,6 +7,7 @@
 #include "LightningSystem.h"
 #include "AudioAnalyzer.h"
 #include "VoidFloor.h"
+#include "EngineSettings.h"
 
 // A dense fog volume lit from within, rather than self-luminous. Real
 // smoke/fog VFX is rendered with a neutral (near-grey) particle albedo
@@ -25,8 +26,8 @@
 //   - GpuParticleSystem: the fog body itself (a large, long-lived pool),
 //     drawn with alpha blending (not additive -- see above).
 //   - ShapeField + ProceduralShapeProvider: an abstract signed-distance
-//     target a fraction of the fog (see kShapeRecruitFraction) can be
-//     attracted to and flow around (ShapeConform force), so structure is
+//     target a fraction of the fog (see ShapeSettings::recruitFraction) can
+//     be attracted to and flow around (ShapeConform force), so structure is
 //     *suggested*, not a rigid point cloud -- this is the extension point
 //     a real face-tracked model plugs into later, via a future
 //     MeshShapeProvider filling the same field. That recruited fraction
@@ -45,21 +46,28 @@
 // The ShapeField's gradient also doubles as a cheap surface normal for a
 // fake volumetric self-shadow (GpuParticleSystem::SetShading, sampled
 // per-particle in particle_sim.comp), kept subtle (see
-// kShadeAmbientFloor) so it reads as a gentle sense of form, not external
-// lighting -- kOverheadLightPos (see the .cpp) supplies this angle and a
-// floor-highlight center, but is deliberately *not* a real light on the
-// particles (never added to Draw()'s lights[] array): every particle's
-// color should read as coming from the core light, from within, combined
-// with the noise-broken sprite alpha (particle_render.frag) that keeps
-// it reading as a lit volume rather than a field of flat, uniform discs.
+// FogLightingSettings::shadeAmbientFloor) so it reads as a gentle sense of
+// form, not external lighting -- lightingSettings_.overheadLightPos
+// supplies this angle and a floor-highlight center, but is deliberately
+// *not* a real light on the particles (never added to Draw()'s lights[]
+// array): every particle's color should read as coming from the core
+// light, from within, combined with the noise-broken sprite alpha
+// (particle_render.frag) that keeps it reading as a lit volume rather than
+// a field of flat, uniform discs.
 // Palette is cool blue/white (Tron Legacy), not the earlier violet.
 // Audio drives lighting only: the core light's color/intensity and
 // lightning both pulse with musical swells. Shape attraction is
-// deliberately independent of audio -- morphStrength eases toward
-// morphForce_, a standalone driver (user-tunable via '-'/'=', see
-// AdjustPrimary) that has nothing to do with the music, so the
-// shape-conform pipeline can be proven out (and later driven by other
-// external forces, e.g. wind/turbulence) without audio in the loop.
+// deliberately independent of audio -- morphStrength_ eases toward
+// shapeSettings_.morphForce, a standalone driver (user-tunable via '-'/'='
+// or the settings panel, see AdjustPrimary) that has nothing to do with
+// the music, so the shape-conform pipeline can be proven out (and later
+// driven by other external forces, e.g. wind/turbulence) without audio in
+// the loop.
+//
+// Every tunable that used to be a `constexpr` in the .cpp's anonymous
+// namespace now lives in one of the ui::*Settings structs below (see
+// src/ui/EngineSettings.h) and is exposed live through VisitSettings() to
+// the runtime settings panel -- see src/ui/EngineUi.h.
 class NeonFogVisualizer : public Visualizer {
 public:
     void Init(ShaderLibrary& shaders, ParticleRenderer& renderer) override;
@@ -70,8 +78,10 @@ public:
 
     const char* ExtraStatusLine() const override;
     void SecondaryAction() override { CycleShapePreset(); } // bound to a dedicated key in App
-    void TertiaryAction() override { autoCycle_ = !autoCycle_; } // bound to 'M' in App
-    void AdjustPrimary(float delta) override; // bound to '-'/'=' in App: nudges morphForce_
+    void TertiaryAction() override { shapeSettings_.autoCycle = !shapeSettings_.autoCycle; } // bound to 'M' in App
+    void AdjustPrimary(float delta) override; // bound to '-'/'=' in App: nudges shapeSettings_.morphForce
+
+    void VisitSettings(ui::IParamVisitor& v) override;
 
 private:
     void CycleShapePreset();
@@ -82,25 +92,30 @@ private:
     LightningSystem lightning_;
     VoidFloor floor_;
 
+    // All user-tunable state -- see src/ui/EngineSettings.h for field-level
+    // docs and tooltips (the same ParamMeta text shown in the panel).
+    ui::FogEmissionSettings emissionSettings_;
+    ui::FogForceSettings forceSettings_;
+    ui::ShapeSettings shapeSettings_;
+    ui::FogLightingSettings lightingSettings_;
+    ui::LightningSettings lightningSettings_;
+    VoidFloor::Params floorParams_;
+    // Seeds floorParams_'s starting look once, the first time Init() runs
+    // (see Init()'s definition) -- Init() re-runs on "Rebuild Systems"
+    // without this guard, that re-seed would silently discard any floor
+    // tuning the user had already dialed in.
+    bool settingsSeeded_ = false;
+
     int gravityForceIndex_ = -1;
     int turbulenceForceIndex_ = -1;
+    int dragForceIndex_ = -1;
     int shapeConformForceIndex_ = -1;
 
-    Vector3 fieldCenter_{ 0, 2.0f, 0 };
-    float morphStrength_ = 0.0f; // smoothed toward morphTarget_ (== morphForce_) each frame
-    float morphTarget_ = 0.0f;
-
-    // The independent driver behind shape attraction -- deliberately not
-    // derived from audio (see the class comment: audio drives lighting
-    // only). User-tunable via '-'/'=' (down to 0, which dissolves all
-    // structure back into uniform fog) so the attraction pipeline is
-    // demonstrably decoupled from the music.
-    float morphForce_ = 1.0f;
+    float morphStrength_ = 0.0f; // smoothed toward shapeSettings_.morphForce each frame
 
     // Auto-advances through shape presets on a fixed timer so the morph
     // is visible without user input; 'S' can also force the next shape
-    // immediately, and 'M' toggles this on/off.
-    bool autoCycle_ = true;
+    // immediately, and 'M' (or the panel) toggles this on/off.
     float shapeTimer_ = 0.0f;
 
     float spawnAccumulator_ = 0.0f;

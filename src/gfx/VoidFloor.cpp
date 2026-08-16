@@ -5,6 +5,18 @@
 #include "rlgl.h"
 
 void VoidFloor::Init(ShaderLibrary& shaders) {
+    // Re-entrant: the settings panel's "Rebuild Systems" action re-runs the
+    // owning visualizer's Init(), which calls this again on the same
+    // instance. Release what a prior Init() allocated first, or the mesh
+    // VBO/VAO and material leak on every rebuild. shader_ itself doesn't
+    // need releasing here -- it's cached and owned by ShaderLibrary, so
+    // LoadGraphics below just returns the same cached handle again.
+    if (initialized_) {
+        UnloadMesh(planeMesh_);
+        UnloadMaterial(material_);
+    }
+    initialized_ = true;
+
     shader_ = shaders.LoadGraphics(
         "assets/shaders/env/void_floor.vert",
         "assets/shaders/env/void_floor.frag");

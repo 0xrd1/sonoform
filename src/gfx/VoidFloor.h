@@ -84,4 +84,11 @@ private:
     int locLightPoolCenter_ = -1;
     int locLightPoolRadius_ = -1;
     int locLightPoolStrength_ = -1;
+
+    // Lets Init() be called more than once on the same instance (the
+    // runtime settings panel's "Rebuild Systems" action re-runs the owning
+    // visualizer's whole Init()) without leaking the mesh VBO/VAO and
+    // material each call would otherwise allocate fresh -- see Init()'s
+    // definition.
+    bool initialized_ = false;
 };

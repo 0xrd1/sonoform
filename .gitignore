@@ -3,3 +3,9 @@ out/
 .cache/
 *.user
 assets/models/
+
+# Runtime-generated settings-panel presets (see src/ui/SettingsIO.h). Lands
+# in build/ when running the built exe directly, or in the repo root when
+# run via the VS debugger (VS_DEBUGGER_WORKING_DIRECTORY = repo root) --
+# either way it's tuned-look data, not source.
+settings/

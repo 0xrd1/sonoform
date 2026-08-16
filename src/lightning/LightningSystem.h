@@ -3,6 +3,8 @@
 #include "raylib.h"
 #include "LightSample.h"
 
+namespace ui { struct LightningSettings; }
+
 // Fractal lightning bolts: strong beats/treble transients spawn bolts
 // built via recursive midpoint displacement (each segment split in half
 // with a random perpendicular offset, halved each level, plus a few
@@ -20,10 +22,12 @@ class LightningSystem {
 public:
     // `origin`: roughly the fog's structural center, where bolts
     // originate. `trigger`: fire a new bolt this frame. `triggerStrength`
-    // in [0,1] scales bolt length, branch count, and brightness.
-    void Update(float dt, Vector3 origin, bool trigger, float triggerStrength);
+    // in [0,1] scales bolt length, branch count, and brightness. `settings`
+    // supplies every other tunable (was file-local literals in SpawnBolt) --
+    // see ui::LightningSettings in src/ui/EngineSettings.h.
+    void Update(float dt, Vector3 origin, bool trigger, float triggerStrength, const ui::LightningSettings& settings);
 
-    void Draw() const;
+    void Draw(const ui::LightningSettings& settings) const;
 
     // Fills `outLights` with up to `maxLights` samples from active bolts,
     // returns how many were written.
@@ -39,7 +43,7 @@ private:
         float brightness = 1.0f;
     };
 
-    void SpawnBolt(Vector3 origin, float strength);
+    void SpawnBolt(Vector3 origin, float strength, const ui::LightningSettings& settings);
 
     std::vector<Bolt> bolts_;
     unsigned int rngState_ = 0x9E3779B9u;

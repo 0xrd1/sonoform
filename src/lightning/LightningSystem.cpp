@@ -1,4 +1,5 @@
 #include "LightningSystem.h"
+#include "EngineSettings.h"
 #include "raymath.h"
 #include <cmath>
 #include <algorithm>
@@ -54,14 +55,15 @@ std::vector<Vector3> BuildFractalPath(Vector3 start, Vector3 end, int depth, flo
 
 } // namespace
 
-void LightningSystem::SpawnBolt(Vector3 origin, float strength) {
+void LightningSystem::SpawnBolt(Vector3 origin, float strength, const ui::LightningSettings& s) {
     strength = Clamp(strength, 0.0f, 1.0f);
 
     Bolt bolt;
 
     float dirAngleXZ = RandFloat(rngState_, 0.0f, 2.0f * PI);
     float dirElevation = RandFloat(rngState_, -0.4f, 0.9f); // biased upward/outward
-    float length = (4.0f + RandFloat(rngState_, 0.0f, 4.0f)) * (0.6f + strength * 0.8f);
+    float length = (s.lengthBase + RandFloat(rngState_, 0.0f, s.lengthJitter)) *
+                   (s.lengthStrengthBase + strength * s.lengthStrengthMult);
 
     Vector3 dir = Vector3Normalize(Vector3{
         std::cos(dirAngleXZ) * std::cos(dirElevation),
@@ -72,11 +74,11 @@ void LightningSystem::SpawnBolt(Vector3 origin, float strength) {
     Vector3 start = Vector3Add(origin, Vector3Scale(dir, 1.0f));
     Vector3 end = Vector3Add(origin, Vector3Scale(dir, length));
 
-    const int depth = 5;
-    float displacement = 1.2f * (0.6f + strength * 0.6f);
+    const int depth = s.fractalDepth;
+    float displacement = s.displacementBase * (0.6f + strength * 0.6f);
     bolt.points = BuildFractalPath(start, end, depth, displacement, rngState_);
 
-    int branchCount = static_cast<int>(RandFloat(rngState_, 1.0f, 3.5f));
+    int branchCount = static_cast<int>(RandFloat(rngState_, static_cast<float>(s.branchCountMin), static_cast<float>(s.branchCountMax) + 0.5f));
     for (int i = 0; i < branchCount && bolt.points.size() > 2; i++) {
         size_t startIdx = static_cast<size_t>(RandFloat(rngState_, 0.3f, 0.7f) * static_cast<float>(bolt.points.size() - 1));
         Vector3 branchStart = bolt.points[startIdx];
@@ -88,21 +90,21 @@ void LightningSystem::SpawnBolt(Vector3 origin, float strength) {
 
     // Electric blue-violet-cyan range, low saturation so it reads as
     // bright near-white light rather than a flat colored line.
-    float hue = std::fmod(200.0f + RandFloat(rngState_, -20.0f, 40.0f) + 360.0f, 360.0f);
-    bolt.color = ColorFromHSV(hue, 0.35f, 1.0f);
-    bolt.maxLife = 0.12f + RandFloat(rngState_, 0.0f, 0.08f);
+    float hue = std::fmod(s.hueBase + RandFloat(rngState_, s.hueJitterMin, s.hueJitterMax) + 360.0f, 360.0f);
+    bolt.color = ColorFromHSV(hue, s.saturation, 1.0f);
+    bolt.maxLife = s.lifeMin + RandFloat(rngState_, 0.0f, s.lifeJitter);
     bolt.life = bolt.maxLife;
-    bolt.brightness = 1.5f + strength * 2.5f;
+    bolt.brightness = s.brightnessBase + strength * s.brightnessStrengthMult;
 
     bolts_.push_back(std::move(bolt));
 
     // Cap concurrent bolts so a burst of rapid beats can't runaway the
     // draw call count.
-    if (bolts_.size() > 6) bolts_.erase(bolts_.begin());
+    if (static_cast<int>(bolts_.size()) > s.maxBolts) bolts_.erase(bolts_.begin());
 }
 
-void LightningSystem::Update(float dt, Vector3 origin, bool trigger, float triggerStrength) {
-    if (trigger) SpawnBolt(origin, triggerStrength);
+void LightningSystem::Update(float dt, Vector3 origin, bool trigger, float triggerStrength, const ui::LightningSettings& settings) {
+    if (trigger) SpawnBolt(origin, triggerStrength, settings);
 
     for (auto it = bolts_.begin(); it != bolts_.end();) {
         it->life -= dt;
@@ -111,7 +113,7 @@ void LightningSystem::Update(float dt, Vector3 origin, bool trigger, float trigg
     }
 }
 
-void LightningSystem::Draw() const {
+void LightningSystem::Draw(const ui::LightningSettings& settings) const {
     for (const auto& bolt : bolts_) {
         float lifeRatio = bolt.life / bolt.maxLife;
         // Sharp attack, fast decay -- a flash, not a linear fade.
@@ -125,8 +127,8 @@ void LightningSystem::Draw() const {
             }
         };
 
-        drawPath(bolt.points, 0.035f, 0.16f);
-        for (const auto& branch : bolt.branches) drawPath(branch, 0.02f, 0.1f);
+        drawPath(bolt.points, settings.coreRadius, settings.haloRadius);
+        for (const auto& branch : bolt.branches) drawPath(branch, settings.branchCoreRadius, settings.branchHaloRadius);
     }
 }
 

@@ -60,3 +60,13 @@ void VisualizerManager::AdjustPrimaryOnCurrent(float delta) {
     if (items_.empty()) return;
     items_[static_cast<size_t>(index_)]->AdjustPrimary(delta);
 }
+
+void VisualizerManager::VisitCurrentSettings(ui::IParamVisitor& v) {
+    if (items_.empty()) return;
+    items_[static_cast<size_t>(index_)]->VisitSettings(v);
+}
+
+void VisualizerManager::RebuildCurrent(ShaderLibrary& shaders, ParticleRenderer& renderer) {
+    if (items_.empty()) return;
+    items_[static_cast<size_t>(index_)]->Init(shaders, renderer);
+}

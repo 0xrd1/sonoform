@@ -3,6 +3,7 @@
 #include "rlgl.h"
 #include "DemoTrack.h"
 #include "GlCompat.h"
+#include "EngineUi.h"
 
 #include "SpectrumRingVisualizer.h"
 #include "GalaxyVisualizer.h"
@@ -96,16 +97,32 @@ bool App::Init(const std::string& audioPathArg) {
     // visualizers_.Add(std::make_unique<TunnelVisualizer>(), shaderLibrary_, *particleRenderer_);
 
     camera_.up = { 0, 1, 0 };
-    camera_.fovy = 45.0f;
+    camera_.fovy = cameraSettings_.fovy;
     camera_.projection = CAMERA_PERSPECTIVE;
     camera_.target = { 0, 2.0f, 0 };
-    camYaw_ = 0.0f;
-    // Steeper than a typical orbit-camera default: at a shallow pitch the
-    // VoidFloor (see gfx/VoidFloor.h) recedes toward the horizon almost
-    // immediately and mostly falls below the frame -- this angle keeps a
-    // meaningful amount of the floor/grid visible alongside the fog.
-    camPitch_ = 0.55f;
-    camDistance_ = 20.0f;
+    // cameraSettings_'s in-class defaults (pitch 0.55, distance 20) already
+    // hold the intended resting view -- steeper than a typical orbit-camera
+    // default because at a shallow pitch the VoidFloor (see gfx/VoidFloor.h)
+    // recedes toward the horizon almost immediately and mostly falls below
+    // the frame. See ui::CameraSettings for the tunable values themselves.
+
+    // After gl_compat::Init() because rlImGuiSetup uploads the font atlas
+    // as a raylib Texture2D and needs a live GL context, and last in Init()
+    // so the earlier failure paths above never leave an orphaned ImGui
+    // context, and Shutdown() can tear down in exact LIFO order.
+    ui::Setup();
+
+    // Restore a previously saved look, if any -- a no-op on first run, when
+    // settings/default.ini doesn't exist yet (see ui::LoadDefaultSettings).
+    // Must come after visualizers_.Add() above, since it reads/writes the
+    // current visualizer's settings via VisitSettings.
+    {
+        ui::PanelState startupState;
+        startupState.visualizers = &visualizers_;
+        startupState.camera = &cameraSettings_;
+        startupState.post = &postSettings_;
+        ui::LoadDefaultSettings(startupState);
+    }
 
     return true;
 }
@@ -167,7 +184,7 @@ void App::Run() {
         if (!paused_) {
             elapsedTime_ += dt;
             if (musicLoaded_) analyzer_.Update();
-            FrameContext frame{ dt, elapsedTime_, analyzer_, intensity_ };
+            FrameContext frame{ dt, elapsedTime_, analyzer_, postSettings_.reactivityIntensity };
             visualizers_.Update(frame);
         }
 
@@ -185,6 +202,18 @@ void App::Run() {
 }
 
 void App::HandleInput(float dt) {
+    // Deliberately outside the WantsKeyboard() gate below: F1 must still
+    // close the panel even while an ImGui field has focus (WantCaptureKeyboard
+    // would otherwise be true and swallow it along with everything else).
+    if (IsKeyPressed(KEY_F1)) showSettingsPanel_ = !showSettingsPanel_;
+
+    // rlImGuiBegin() only *copies* raylib's input state into ImGuiIO (see
+    // EngineUi.cpp) -- it doesn't consume it, so IsKeyPressed keeps firing
+    // underneath a focused ImGui widget without this gate. See the plan's
+    // "Input arbitration" section for why this has to be a whole-function
+    // early-out here but only a partial gate in UpdateCameraOrbit.
+    if (ui::WantsKeyboard()) return;
+
     if (IsKeyPressed(KEY_ONE)) visualizers_.SetIndex(0);
     if (IsKeyPressed(KEY_TWO)) visualizers_.SetIndex(1);
     if (IsKeyPressed(KEY_THREE)) visualizers_.SetIndex(2);
@@ -203,36 +232,56 @@ void App::HandleInput(float dt) {
         else ResumeMusicStream(music_);
     }
 
-    if (IsKeyPressed(KEY_C)) autoRotate_ = !autoRotate_;
+    if (IsKeyPressed(KEY_C)) cameraSettings_.autoRotate = !cameraSettings_.autoRotate;
     if (IsKeyPressed(KEY_R)) {
-        camYaw_ = 0.0f;
-        camPitch_ = 0.55f;
-        camDistance_ = 20.0f;
+        ui::CameraSettings d; // resets orientation/distance only -- rates/limits/fov are left as tuned
+        cameraSettings_.yaw = d.yaw;
+        cameraSettings_.pitch = d.pitch;
+        cameraSettings_.distance = d.distance;
     }
     if (IsKeyPressed(KEY_F)) ToggleFullscreen();
     if (IsKeyPressed(KEY_H)) showHud_ = !showHud_;
 
-    if (IsKeyDown(KEY_LEFT_BRACKET)) intensity_ -= dt * 0.6f;
-    if (IsKeyDown(KEY_RIGHT_BRACKET)) intensity_ += dt * 0.6f;
-    intensity_ = Clamp(intensity_, 0.25f, 3.0f);
+    if (IsKeyDown(KEY_LEFT_BRACKET)) postSettings_.reactivityIntensity -= dt * 0.6f;
+    if (IsKeyDown(KEY_RIGHT_BRACKET)) postSettings_.reactivityIntensity += dt * 0.6f;
+    postSettings_.reactivityIntensity = Clamp(postSettings_.reactivityIntensity, 0.25f, 3.0f);
 }
 
 void App::UpdateCameraOrbit(float dt) {
-    if (autoRotate_) camYaw_ += dt * 0.15f;
+    camera_.fovy = cameraSettings_.fovy;
 
-    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+    if (cameraSettings_.autoRotate) cameraSettings_.yaw += dt * cameraSettings_.autoRotateSpeed;
+
+    // Only the two input-driven branches below are gated on WantsMouse(),
+    // never this whole function: an early return here would freeze
+    // auto-rotate and skip the camera_.position recompute at the bottom
+    // whenever the pointer happens to cross a panel.
+    const bool uiOwnsMouse = ui::WantsMouse();
+
+    // The orbit drag is latched on press rather than re-tested every frame
+    // (orbiting_, see App.h), so dragging *over* a panel mid-orbit doesn't
+    // stall the camera: ImGui reports WantCaptureMouse for anything
+    // hovering a window, with no notion that this drag already started.
+    if (!uiOwnsMouse && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) orbiting_ = true;
+    if (IsMouseButtonReleased(MOUSE_BUTTON_RIGHT)) orbiting_ = false;
+
+    if (orbiting_) {
         Vector2 d = GetMouseDelta();
-        camYaw_ -= d.x * 0.005f;
-        camPitch_ = Clamp(camPitch_ + d.y * 0.005f, -1.4f, 1.4f);
+        cameraSettings_.yaw -= d.x * cameraSettings_.dragSensitivity;
+        cameraSettings_.pitch = Clamp(cameraSettings_.pitch + d.y * cameraSettings_.dragSensitivity,
+                                       -cameraSettings_.pitchLimit, cameraSettings_.pitchLimit);
     }
 
-    camDistance_ -= GetMouseWheelMove() * 1.5f;
-    camDistance_ = Clamp(camDistance_, 4.0f, 60.0f);
+    // Wheel zoom is a per-event action with no drag to latch, so a plain
+    // gate is correct here -- and necessary, or scrolling an ImGui list
+    // would also dolly the camera.
+    if (!uiOwnsMouse) cameraSettings_.distance -= GetMouseWheelMove() * cameraSettings_.zoomSpeed;
+    cameraSettings_.distance = Clamp(cameraSettings_.distance, cameraSettings_.minDistance, cameraSettings_.maxDistance);
 
     camera_.position = {
-        camDistance_ * cosf(camPitch_) * sinf(camYaw_),
-        camDistance_ * sinf(camPitch_) + 3.0f,
-        camDistance_ * cosf(camPitch_) * cosf(camYaw_)
+        cameraSettings_.distance * cosf(cameraSettings_.pitch) * sinf(cameraSettings_.yaw),
+        cameraSettings_.distance * sinf(cameraSettings_.pitch) + 3.0f,
+        cameraSettings_.distance * cosf(cameraSettings_.pitch) * cosf(cameraSettings_.yaw)
     };
 }
 
@@ -272,9 +321,16 @@ void App::Draw() {
 
     BeginDrawing();
     ClearBackground(BLACK);
-    postProcess_->Composite(bloomThreshold_, bloomIntensity_);
+    postProcess_->Composite(postSettings_.bloomThreshold, postSettings_.bloomIntensity);
 
     if (showHud_) DrawHUD();
+
+    // Drawn last, outside PostProcess::BeginScene/EndScene: bloom only ever
+    // reads sceneTarget_, which received everything drawn between those two
+    // calls above, so the panel is neither bright-pass extracted nor
+    // blurred -- crisp text/widgets over a bloomed scene. After DrawHUD()
+    // so panels sit on top of the plain-text HUD rather than under it.
+    DrawUi();
 
     EndDrawing();
 }
@@ -287,7 +343,7 @@ void App::DrawHUD() const {
     DrawText(TextFormat("Visualizer [%d/%d]: %s", visualizers_.CurrentIndex() + 1, visualizers_.Count(), visualizers_.CurrentName()),
               pad, y, 18, RAYWHITE); y += 22;
     DrawText(TextFormat("Particles: %d", hudParticleCount_), pad, y, 18, RAYWHITE); y += 22;
-    DrawText(TextFormat("Intensity: %.2f", intensity_), pad, y, 18, RAYWHITE); y += 22;
+    DrawText(TextFormat("Intensity: %.2f", postSettings_.reactivityIntensity), pad, y, 18, RAYWHITE); y += 22;
 
     const char* extra = visualizers_.CurrentExtraStatusLine();
     if (extra != nullptr) { DrawText(extra, pad, y, 16, SKYBLUE); y += 20; }
@@ -298,8 +354,37 @@ void App::DrawHUD() const {
     const char* controls =
         "1-5: switch visualizer   Tab/Right/Left: cycle   Space: pause   S: cycle shape   M: toggle auto-cycle (Neon Fog)\n"
         "Right-drag: orbit camera   Wheel: zoom   C: toggle auto-rotate   R: reset camera\n"
-        "[ / ]: light intensity   - / =: morph force (Neon Fog)   F: fullscreen   H: toggle HUD   Esc: quit";
+        "[ / ]: light intensity   - / =: morph force (Neon Fog)   F: fullscreen   H: toggle HUD   F1: settings panel   Esc: quit";
     DrawText(controls, pad, GetScreenHeight() - 70, 16, Fade(RAYWHITE, 0.75f));
+}
+
+void App::DrawUi() {
+    // BeginFrame()/EndFrame() run every frame regardless of
+    // showSettingsPanel_, not just when the window is actually drawn:
+    // skipping them while hidden would freeze ui::WantsKeyboard()/
+    // WantsMouse() at whatever they last were the instant before F1 hid the
+    // panel, instead of correctly settling back to false once nothing is
+    // hovered. With no window open, rlImGui simply has nothing to render.
+    ui::BeginFrame();
+
+    if (showSettingsPanel_) {
+        ui::PanelState state;
+        state.visualizers = &visualizers_;
+        state.shaders = &shaderLibrary_;
+        state.renderer = particleRenderer_.get();
+        state.camera = &cameraSettings_;
+        state.post = &postSettings_;
+        state.showHud = &showHud_;
+        state.paused = &paused_;
+        state.music = &music_;
+        state.musicLoaded = musicLoaded_;
+        state.particleCount = hudParticleCount_;
+        state.trackLabel = trackLabel_.c_str();
+
+        ui::DrawDebugPanel(state);
+    }
+
+    ui::EndFrame();
 }
 
 void App::Shutdown() {
@@ -308,6 +393,12 @@ void App::Shutdown() {
         StopMusicStream(music_);
         UnloadMusicStream(music_);
     }
+
+    // Same "before CloseWindow()" rule the block below documents:
+    // rlImGuiShutdown unloads the font atlas Texture2D through raylib,
+    // which needs a live GL context. Created last in Init(), destroyed
+    // first here.
+    ui::Shutdown();
 
     // Every GPU resource (particle SSBOs, compute programs, the render
     // VAO, cached shaders) must be released while the GL context is still

@@ -8,6 +8,7 @@
 #include "ShaderLibrary.h"
 #include "ParticleRenderer.h"
 #include "PostProcess.h"
+#include "EngineSettings.h"
 
 class App {
 public:
@@ -23,14 +24,17 @@ private:
     void Update(float dt);
     void Draw();
     void DrawHUD() const;
+    void DrawUi(); // the ImGui settings panel -- see src/ui/EngineUi.h; non-const, unlike DrawHUD
     void UpdateCameraOrbit(float dt);
     bool LoadAudio(const std::string& audioPathArg);
 
     Camera3D camera_{};
-    float camYaw_ = 0.0f;
-    float camPitch_ = 0.55f;
-    float camDistance_ = 20.0f;
-    bool autoRotate_ = true;
+    ui::CameraSettings cameraSettings_;
+    // Latches the right-drag orbit gesture on mouse-down rather than
+    // testing IsMouseButtonDown every frame, so dragging *over* an ImGui
+    // panel mid-orbit doesn't stall the camera -- see UpdateCameraOrbit's
+    // comment. ImGui's WantCaptureMouse only gates starting a new drag.
+    bool orbiting_ = false;
 
     Music music_{};
     bool musicLoaded_ = false;
@@ -60,12 +64,11 @@ private:
     // RenderContext::accentTexture).
     Texture2D accentTexture_{};
 
-    float intensity_ = 1.0f;
-    float bloomThreshold_ = 0.35f;
-    float bloomIntensity_ = 1.1f;
+    ui::PostSettings postSettings_;
     bool paused_ = false;
     float elapsedTime_ = 0.0f;
     bool showHud_ = true;
+    bool showSettingsPanel_ = true; // ImGui panel visibility, toggled by F1 -- independent of showHud_ ('H')
 
     // Throttled HUD particle-count readback (see GpuParticleSystem::AliveCountApprox).
     int hudParticleCount_ = 0;

@@ -4,6 +4,7 @@
 class ShaderLibrary;
 class ParticleRenderer;
 class AudioAnalyzer;
+namespace ui { class IParamVisitor; }
 
 // Everything a visualizer needs to advance its simulation for one frame.
 struct FrameContext {
@@ -73,4 +74,15 @@ public:
     // carries sign and magnitude (already scaled by dt by the caller).
     // Default no-op.
     virtual void AdjustPrimary(float /*delta*/) {}
+
+    // Exposes every tunable this visualizer owns to the runtime settings
+    // panel (see src/ui/EngineUi.h) -- the general-purpose successor to the
+    // SecondaryAction/TertiaryAction/AdjustPrimary hooks above, which cap
+    // out at exactly one continuous float and two toggles per visualizer.
+    // Default no-op, so a visualizer that hasn't been wired up yet (see
+    // App.cpp's kAudioEnabled comment on the other four) simply contributes
+    // nothing to the panel instead of needing a stub override. Implementors
+    // typically wrap each owned settings struct's own Visit() in a
+    // v.BeginGroup(name)/v.EndGroup() pair -- see NeonFogVisualizer::VisitSettings.
+    virtual void VisitSettings(ui::IParamVisitor& /*v*/) {}
 };
