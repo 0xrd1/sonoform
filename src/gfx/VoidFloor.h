@@ -38,11 +38,14 @@ public:
         // before fading into the void, not a small patch hidden beneath
         // it -- see NeonFogVisualizer's verification notes.
         float voidRadius = 45.0f;
-        // Clearly brighter than App's scene-clear color (Color{6,6,12},
-        // see PostProcess::BeginScene) so the floor reads as present
-        // against the void instead of blending into it.
-        Color baseColor{ 14, 20, 40, 255 };
-        Color gridColor{ 60, 170, 255, 255 };
+        // Deliberately neutral -- the Tron-blue palette belongs to the
+        // fog/lighting, not the stage (see NeonFogVisualizer's class
+        // comment). Clearly brighter than App's scene-clear color
+        // (Color{6,6,12}, see PostProcess::BeginScene) so the floor
+        // reads as present against the void instead of blending into it,
+        // but flat black/dark grey, not colored.
+        Color baseColor{ 9, 9, 10, 255 };
+        Color gridColor{ 45, 45, 48, 255 };
         float gridSpacing = 2.0f;
         float gridLineWidth = 0.09f;
 
@@ -52,9 +55,11 @@ public:
         float shadowRadius = 3.5f;
         float shadowStrength = 0.8f;
 
+        // Soft: this is a faint hint of where the (deliberately very
+        // subtle, non-colored) key light falls, not a visible glow.
         Vector3 lightPoolCenter{ 0, -3.5f, 0 };
         float lightPoolRadius = 15.0f;
-        float lightPoolStrength = 0.5f;
+        float lightPoolStrength = 0.15f;
     };
 
     // `shapeField` may be null -- the contact shadow is simply skipped

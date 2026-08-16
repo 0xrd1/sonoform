@@ -39,8 +39,8 @@ void main() {
     float voidFade = 1.0 - smoothstep(uVoidRadius * 0.45, uVoidRadius, distFromCenter);
     if (voidFade <= 0.001) discard;
 
-    // Thin glowing grid lines (Tron-style), the primary depth/scale cue
-    // in an otherwise featureless dark plane.
+    // Thin, faint grid lines -- neutral grey, not glowing -- the primary
+    // depth/scale cue in an otherwise featureless dark plane.
     vec2 g = abs(fract(offset / uGridSpacing) - 0.5) * uGridSpacing;
     float lineDist = min(g.x, g.y);
     float line = 1.0 - smoothstep(0.0, uGridLineWidth, lineDist);

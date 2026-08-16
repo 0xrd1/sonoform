@@ -3,6 +3,7 @@ layout(local_size_x = 64) in;
 
 #include "../common/particle_types.glsl"
 #include "../common/random.glsl"
+#include "../common/recruit.glsl"
 #include "../shapes/shape_field_sample.glsl"
 
 // Mirrors the old CPU EmitParams (src/particles/ParticleSystem.h) plus one
@@ -28,6 +29,17 @@ uniform vec4 uColorB;
 uniform vec4 uSizeLifeJitter;  // x = size, y = sizeJitter, z = life, w = lifeJitter
 uniform uint uEmitCount;
 uniform uint uSeed;
+
+// Life-differentiation for shape-attracted systems (see GpuEmitParams::
+// recruitFraction): the same RecruitRoll check shape_conform.glsl uses
+// every frame decides, once, at spawn, whether a particle gets the normal
+// (uSizeLifeJitter.z/w) "core" life or this shorter "shed" life -- always
+// set unconditionally by GpuParticleSystem::Emit (uRecruitFraction
+// defaults to 1.0, meaning "everyone gets the core life", so emitters
+// that never touch this behave exactly as before).
+uniform float uRecruitFraction;
+uniform float uShedLife;
+uniform float uShedLifeJitter;
 
 void main() {
     uint tid = gl_GlobalInvocationID.x;
@@ -106,7 +118,19 @@ void main() {
     color.a = 1.0;
 
     float size = uSizeLifeJitter.x + RandRange(rng, -uSizeLifeJitter.y, uSizeLifeJitter.y);
-    float life = max(0.05, uSizeLifeJitter.z + RandRange(rng, -uSizeLifeJitter.w, uSizeLifeJitter.w));
+
+    // Captured *before* the life roll below so it's the exact value
+    // shape_conform.glsl will later re-derive the same RecruitRoll from
+    // (stored into params.y unchanged) -- see uRecruitFraction's comment.
+    // A particle assigned the long "core" life here is therefore
+    // guaranteed to also be recruited by the force every frame for the
+    // rest of its life, and a "shed" particle never spuriously gets
+    // pulled back onto the shape.
+    float seed = float(rng);
+    bool isRecruited = RecruitRoll(seed) <= uRecruitFraction;
+    float life = isRecruited
+        ? max(0.05, uSizeLifeJitter.z + RandRange(rng, -uSizeLifeJitter.w, uSizeLifeJitter.w))
+        : max(0.05, uShedLife + RandRange(rng, -uShedLifeJitter, uShedLifeJitter));
 
     particles[idx].positionLife = vec4(pos, life);
     particles[idx].velocitySize = vec4(vel, size);
@@ -114,5 +138,5 @@ void main() {
     // w = shade factor, defaults to fully lit (1.0) so a particle isn't a
     // black flash for the one frame between spawn and its first sim tick
     // -- see particle_types.glsl and particle_sim.comp's uHasShapeField.
-    particles[idx].params = vec4(life, float(rng), 0.0, 1.0);
+    particles[idx].params = vec4(life, seed, 0.0, 1.0);
 }

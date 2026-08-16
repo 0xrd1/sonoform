@@ -85,6 +85,14 @@ void GpuParticleSystem::Emit(const GpuEmitParams& params, int count) {
     SetVec4(emitProgram_, "uColorA", colorA);
     SetVec4(emitProgram_, "uColorB", colorB);
     SetVec4(emitProgram_, "uSizeLifeJitter", sizeLifeJitter);
+    // Always set unconditionally (not gated behind any "if configured"
+    // check): uRecruitFraction defaults to 1.0 in GpuEmitParams, and
+    // since the emit program is shared across every particle system,
+    // leaving it unset would leave GL's uniform default of 0.0 in place
+    // for every OTHER emitter too, breaking their (unrelated) spawns.
+    SetFloat(emitProgram_, "uRecruitFraction", params.recruitFraction);
+    SetFloat(emitProgram_, "uShedLife", params.shedLife);
+    SetFloat(emitProgram_, "uShedLifeJitter", params.shedLifeJitter);
     SetUint(emitProgram_, "uEmitCount", static_cast<unsigned int>(count));
     SetUint(emitProgram_, "uSeed", emitSeedCounter_++);
 

@@ -223,7 +223,7 @@ void App::UpdateCameraOrbit(float dt) {
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
         Vector2 d = GetMouseDelta();
         camYaw_ -= d.x * 0.005f;
-        camPitch_ = Clamp(camPitch_ - d.y * 0.005f, -1.4f, 1.4f);
+        camPitch_ = Clamp(camPitch_ + d.y * 0.005f, -1.4f, 1.4f);
     }
 
     camDistance_ -= GetMouseWheelMove() * 1.5f;

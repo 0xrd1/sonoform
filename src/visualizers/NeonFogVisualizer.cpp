@@ -18,7 +18,7 @@ namespace {
 // iteration's 150000 once the real fix for sprite legibility (noise-broken
 // alpha in particle_render.frag, not raw count) landed and confirmed
 // headroom at 60fps -- see NeonFogVisualizer.h's class comment.
-constexpr int kFogCapacity = 400000;
+constexpr int kFogCapacity = 320000;
 constexpr int kShapeGridResolution = 40;
 // Grid half-extent must comfortably exceed the largest shape's radius
 // (~3.5, the torus) plus the emission candidate box below it, or samples
@@ -33,21 +33,30 @@ constexpr float kShapeGridHalfExtent = 6.0f;
 constexpr float kGravityStrength = 0.35f;
 constexpr float kGravitySoftening = 3.5f;
 
-constexpr float kTurbulenceStrength = 0.3f;
+// Kept deliberately weak: real per-particle turbulence-as-a-motion-driver
+// is a later phase (wind/swirl forces, explicitly deferred). Today it
+// should read as barely-there surface shimmer, not the dominant motion --
+// too strong and it fights ShapeConform hard enough that the structure
+// never firms up, reading as "video game particles" instead of a held
+// fog shape.
+constexpr float kTurbulenceStrength = 0.12f;
 constexpr float kTurbulenceScale = 0.08f;
 
-// Moderate: particles already spawn on the surface (see Update's emission
-// block), so this force's job in steady state is mostly *maintaining*
-// that position against turbulence/gravity and pulling still-alive
-// particles across to a new shape when one is selected -- not doing the
-// initial recruiting work the old design relied on it for.
-constexpr float kShapeAttraction = 1.4f;
-constexpr float kShapeCurl = 0.6f;
+// Firm hold: particles already spawn on the surface (see Update's
+// emission block), so this force's job in steady state is mostly
+// *maintaining* that position against turbulence/gravity and pulling
+// still-alive particles across to a new shape when one is selected.
+// Attraction raised and curl-flow lowered vs. earlier tuning so the
+// structure reads as solidly held rather than wobbling.
+constexpr float kShapeAttraction = 1.8f;
+constexpr float kShapeCurl = 0.3f;
 // The fraction of particles that stay locked to the shape for their whole
-// life; the rest shed off it under gravity/turbulence alone once spawned,
-// reading as haze drifting away from a solid core -- see the emission
-// comment in Update().
-constexpr float kShapeRecruitFraction = 0.65f;
+// life (see GpuEmitParams::recruitFraction -- this same value also
+// decides which particles get the long "core" life vs. the short "shed"
+// life in Update()'s emission block, via the shared RecruitRoll hash).
+// High: the volume should read as mostly-one-coherent-mass, with only a
+// small fraction ever shedding off as haze.
+constexpr float kShapeRecruitFraction = 0.85f;
 
 // How far out (from the shape's center) candidate spawn points are chosen
 // before being projected onto the surface -- see GpuEmitMode::ShapeSurface.
@@ -60,11 +69,14 @@ constexpr float kShapeCycleSeconds = 6.0f;
 
 // The environment/stage (see gfx/VoidFloor.h): a floor well below the fog
 // volume (which normally spans roughly y in [-1.5, 6] around fieldCenter_)
-// so it's visibly a separate, distant surface, plus a genuine second light
-// source -- distinct from the internal core light -- positioned high above
-// so it acts like an overhead key light, giving the fog real directional
-// shading (see GpuParticleSystem::SetShading) instead of only the core
-// light's inverse-square falloff.
+// so it's visibly a separate, distant surface. kOverheadLightPos is
+// *not* a real light on the particles (see Draw() -- it's deliberately
+// left out of the lights[] array): its only jobs are (1) the angle for
+// the fake self-shadow (GpuParticleSystem::SetShading), kept subtle via
+// a high kShadeAmbientFloor so it reads as gentle form, not external
+// sunlight, and (2) VoidFloor's soft light-pool center. The fog's color
+// should read as coming from within (the core light, see Update()), not
+// from being lit from outside.
 // Close enough below the fog's typical extent (roughly y in [-1.5, 6]
 // around fieldCenter_) to read as clearly separate, but not so far that
 // the camera's default pitch (see App::Init) puts it below the frame --
@@ -72,13 +84,11 @@ constexpr float kShapeCycleSeconds = 6.0f;
 // far faster than its raw distance below the subject suggests.
 constexpr float kFloorY = -2.2f;
 const Vector3 kOverheadLightPos{ 1.5f, 16.0f, -3.0f };
-constexpr float kOverheadLightIntensity = 3.0f;
-// Cool near-white -- Tron Legacy palette, not the fog's own violet-free
-// blue tint (see the core light / albedo colors in Update()).
-const Color kOverheadLightColor = ColorFromHSV(200.0f, 0.15f, 1.0f);
-// Keeps the self-shadowed side of the structure dim, not pure black --
-// still reads as fog, not a hard-shaded solid.
-constexpr float kShadeAmbientFloor = 0.35f;
+// High: keeps the self-shadowed side of the structure only slightly
+// dimmer than the lit side -- a subtle sense of form/dimension, not a
+// bright-side/dark-side split that would read as an external key light
+// rather than "a mass glowing from within."
+constexpr float kShadeAmbientFloor = 0.75f;
 }
 
 void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer) {
@@ -91,7 +101,7 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
 
     gravityForceIndex_ = fog_->AddForce(gpu_force::GravityWell(fieldCenter_, kGravityStrength, kGravitySoftening));
     turbulenceForceIndex_ = fog_->AddForce(gpu_force::Turbulence(kTurbulenceStrength, kTurbulenceScale));
-    fog_->AddForce(gpu_force::Drag(0.8f));
+    fog_->AddForce(gpu_force::Drag(1.0f));
     shapeConformForceIndex_ = fog_->AddForce(
         gpu_force::ShapeConform(kShapeAttraction, kShapeCurl, 0.0f, kShapeRecruitFraction));
 
@@ -134,16 +144,19 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     if (frame.audio.BeatTriggered()) beatFlash_ = 1.0f;
     beatFlash_ = std::max(0.0f, beatFlash_ - frame.dt * 2.0f);
 
-    // The core light: the fog's one persistent light source, positioned
-    // at the shape's center. Bass/treble nudge its hue within the cool
-    // cyan-blue family (Tron Legacy palette, not the earlier violet);
-    // energy and beat flashes drive its intensity, and lower saturation
-    // than before means a bright swell pushes toward white rather than
-    // staying a saturated color. This is what actually colors the fog
-    // (see the class comment) -- particle albedo itself stays neutral.
+    // The core light: the fog's *only* real light source now (see Draw()
+    // -- the overhead position no longer contributes to lightBoost), so
+    // this is what "glowing from within" actually means: everything the
+    // fog's color does comes from here. Bass/treble nudge its hue within
+    // the cool cyan-blue family (Tron Legacy palette, not the earlier
+    // violet). Intensity raised and saturation raised back up from the
+    // last pass -- at the previous resting value the inverse-square
+    // falloff (particle_render.vert) was too weak to saturate color out
+    // to the shape's own surface (radius ~2.5-3.5), reading as grey
+    // particles rather than a vivid internal glow.
     float coreHue = 200.0f - frame.audio.Bass() * 15.0f + frame.audio.Treble() * 20.0f;
-    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), 0.55f, 1.0f);
-    coreLightIntensity_ = (1.5f + frame.audio.Energy() * 4.0f + beatFlash_ * 2.5f) * frame.intensity;
+    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), 0.75f, 1.0f);
+    coreLightIntensity_ = (3.0f + frame.audio.Energy() * 4.0f + beatFlash_ * 2.5f) * frame.intensity;
 
     // Emission: every particle is born already on (or just off) the
     // *current* shape's surface via GpuEmitMode::ShapeSurface -- a single
@@ -152,17 +165,23 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     // volume. This is the standard professional-VFX pattern for
     // "structure that reacts instantly": bias birth position by the SDF
     // instead of relying purely on a force to drag particles there over
-    // several seconds. It also makes a shape change (CycleShapePreset)
-    // read immediately -- freshly spawned particles appear on the *new*
-    // shape within a fraction of a second, layered with the still-alive
-    // recruited particles from before, which the ShapeConform force
-    // visibly migrates from the old surface to the new one (see the
-    // class comment: that migration is the actual "attraction" this
-    // pipeline exists to prove). Constant/not audio-driven -- see the
-    // class comment. Paced so steady-state population (spawnRate * life)
-    // sits well under kFogCapacity: 50000 * 6 = 300000 of 400000, leaving
-    // headroom for transition bursts.
-    constexpr float kSpawnRate = 50000.0f;
+    // several seconds.
+    //
+    // Life is differentiated (ep.life vs ep.shedLife, both gated by
+    // ep.recruitFraction -- see particle_emit.comp and
+    // GpuEmitParams::recruitFraction): the ~85% "core" fraction gets a
+    // long life and is what the ShapeConform force actually holds onto
+    // the shape, so it persists across a shape change and *flows* from
+    // the old silhouette to the new one -- this is what makes the whole
+    // thing read as one volume morphing, not a fresh population
+    // replacing the old one. Only the ~15% "shed" fraction gets a short
+    // life, reading as occasional wisps peeling off and dissipating.
+    // Constant/not audio-driven -- see the class comment.
+    //
+    // Paced for steady-state (spawnRate * life, split by recruitFraction)
+    // well under kFogCapacity: core 0.85*9800*30 ~= 250000, shed
+    // 0.15*9800*6 ~= 8800, total ~= 259000 of 320000.
+    constexpr float kSpawnRate = 9800.0f;
     spawnAccumulator_ += frame.dt * kSpawnRate;
     int spawnCount = static_cast<int>(spawnAccumulator_);
     if (spawnCount > 0) {
@@ -194,11 +213,19 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
         // overlap is what the higher kFogCapacity/kSpawnRate above buys.
         ep.size = 0.16f;
         ep.sizeJitter = 0.07f;
-        // Short enough for fast turnover (a shape change reads within
-        // roughly one lifetime) but long enough for shed (unrecruited)
-        // particles to visibly drift as haze before dying.
-        ep.life = 6.0f;
-        ep.lifeJitter = 2.0f;
+
+        // Long "core" life: this is the population ShapeConform actually
+        // holds onto the shape (see kShapeRecruitFraction) and what makes
+        // the fog persist as one mass across shape changes instead of
+        // popping in/out every few seconds.
+        ep.life = 30.0f;
+        ep.lifeJitter = 8.0f;
+        ep.recruitFraction = kShapeRecruitFraction;
+        // Short "shed" life: only the ~15% that misses recruitment gets
+        // this -- long enough to visibly drift as a wisp of haze before
+        // dying, short enough that it reads as occasional, not the norm.
+        ep.shedLife = 6.0f;
+        ep.shedLifeJitter = 2.0f;
 
         fog_->Emit(ep, spawnCount);
     }
@@ -227,12 +254,13 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     floorParams.lightPoolCenter = floorParams.center; // pool sits under the overhead light, which is above fieldCenter_
     floor_.Draw(floorParams, shapeField_.get());
 
-    // Core light occupies slot 0, the overhead key light slot 1; lightning
-    // bolts fill the rest.
+    // Core light occupies slot 0; lightning bolts fill the rest. No
+    // overhead-light entry here deliberately -- see the class comment
+    // and kOverheadLightPos's comment: it's not a real light on the
+    // particles, only a shading angle and a floor-pool center.
     std::array<LightSample, kMaxParticleLights> lights{};
     lights[0] = LightSample{ fieldCenter_, coreLightIntensity_, coreLightColor_ };
-    lights[1] = LightSample{ kOverheadLightPos, kOverheadLightIntensity, kOverheadLightColor };
-    int lightCount = 2 + lightning_.GatherLights(lights.data() + 2, kMaxParticleLights - 2);
+    int lightCount = 1 + lightning_.GatherLights(lights.data() + 1, kMaxParticleLights - 1);
 
     // Standard alpha blending, not additive: the fog is meant to read as
     // a gas being lit, not a self-luminous energy cloud -- see the class
@@ -243,7 +271,13 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // not a shortcut specific to this engine.
     BeginBlendMode(BLEND_ALPHA);
     if (fog_) {
-        fog_->Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, /*fadeMode=*/1, /*sizeScale=*/1.0f,
+        // fadeMode 2 (particle_render.vert's two-sided fade, in over the
+        // first ~25% of life and out over the final ~17%) instead of 1
+        // (instant-full-opacity-at-spawn): with mode 1 every newly
+        // spawned particle snapped to full brightness the instant it
+        // existed, which read as a visible "pop in" no matter how the
+        // lifecycle/spawn-rate was tuned.
+        fog_->Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, /*fadeMode=*/2, /*sizeScale=*/1.0f,
                    lights.data(), lightCount, lastTime_);
     }
     EndBlendMode();

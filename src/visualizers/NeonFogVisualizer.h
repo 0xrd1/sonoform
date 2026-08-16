@@ -25,26 +25,33 @@
 //   - GpuParticleSystem: the fog body itself (a large, long-lived pool),
 //     drawn with alpha blending (not additive -- see above).
 //   - ShapeField + ProceduralShapeProvider: an abstract signed-distance
-//     target a fraction of the fog can be attracted to and flow around
-//     (ShapeConform force), so structure is *suggested*, not a rigid
-//     point cloud -- this is the extension point a real face-tracked
-//     model plugs into later, via a future MeshShapeProvider filling the
-//     same field. Particles pulled onto the shape sit closer to the core
-//     light and so read brighter than the ambient fog around them,
-//     which is what actually makes the structure legible.
+//     target a fraction of the fog (see kShapeRecruitFraction) can be
+//     attracted to and flow around (ShapeConform force), so structure is
+//     *suggested*, not a rigid point cloud -- this is the extension point
+//     a real face-tracked model plugs into later, via a future
+//     MeshShapeProvider filling the same field. That recruited fraction
+//     also gets a long life (see GpuEmitParams::recruitFraction) so it
+//     *persists* across shape changes rather than dying and being
+//     replaced -- the same particles visibly flow from the old
+//     silhouette to the new one, which is what makes this read as one
+//     volume morphing instead of a population turning over.
 //   - LightningSystem: fractal bolts that fire on intense music, drawn
 //     additively (bolts genuinely are light-emitting) and contributing
 //     their own transient lights alongside the core light.
-//   - VoidFloor: a dark "stage" (floor, glowing grid, contact shadow, and
-//     a genuine second overhead LightSample) so the fog reads as a
-//     character occupying real 3D space, not a sprite cloud on flat
-//     black -- see gfx/VoidFloor.h.
+//   - VoidFloor: a dark, neutral "stage" (floor, faint grid, contact
+//     shadow) so the fog reads as a character occupying real 3D space,
+//     not a sprite cloud on flat black -- see gfx/VoidFloor.h. Its color
+//     is deliberately plain, not part of the fog's own palette.
 // The ShapeField's gradient also doubles as a cheap surface normal for a
 // fake volumetric self-shadow (GpuParticleSystem::SetShading, sampled
-// per-particle in particle_sim.comp) -- the side of the structure facing
-// the overhead light reads brighter than the far side, which combined
-// with the noise-broken sprite alpha (particle_render.frag) is what makes
-// this read as a lit volume rather than a field of flat, uniform discs.
+// per-particle in particle_sim.comp), kept subtle (see
+// kShadeAmbientFloor) so it reads as a gentle sense of form, not external
+// lighting -- kOverheadLightPos (see the .cpp) supplies this angle and a
+// floor-highlight center, but is deliberately *not* a real light on the
+// particles (never added to Draw()'s lights[] array): every particle's
+// color should read as coming from the core light, from within, combined
+// with the noise-broken sprite alpha (particle_render.frag) that keeps
+// it reading as a lit volume rather than a field of flat, uniform discs.
 // Palette is cool blue/white (Tron Legacy), not the earlier violet.
 // Audio drives lighting only: the core light's color/intensity and
 // lightning both pulse with musical swells. Shape attraction is

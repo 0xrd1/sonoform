@@ -9,6 +9,7 @@
 // approximately tangential to it.
 #include "shape_field_sample.glsl"
 #include "noise.glsl"
+#include "../common/recruit.glsl"
 
 // b.x = attraction strength, b.y = curl-flow strength, b.z = morphStrength
 // (0 = fully ignore the field -- particles behave as free-floating fog --
@@ -29,20 +30,24 @@ vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, f
 
     // Deterministic per-particle recruitment from the particle's own rng
     // seed (stable for that particle's whole lifetime -- it doesn't
-    // flicker between recruited/not from frame to frame).
-    float recruit = fract(particleSeed * 0.6180339887);
-    if (recruit > recruitFraction) return vec3(0.0);
+    // flicker between recruited/not from frame to frame). Shared with
+    // particle_emit.comp's spawn-time life decision via RecruitRoll --
+    // see common/recruit.glsl -- so a particle spawned with a long
+    // ("core") life is guaranteed to also be recruited here, forever.
+    if (RecruitRoll(particleSeed) > recruitFraction) return vec3(0.0);
 
     vec4 fieldSample = SampleShapeField(pos);
     vec3 gradient = fieldSample.xyz;
     float dist = fieldSample.w;
 
     // Pull toward the surface: outside (dist>0) pulls inward along
-    // -gradient, inside (dist<0) pushes outward along +gradient. A soft
+    // -gradient, inside (dist<0) pushes outward along +gradient. A small
     // deadband near the surface keeps particles hovering/orbiting it
     // instead of pinning exactly onto it (which would look like a solid
-    // shell, not fog).
-    float pull = clamp(abs(dist) - 0.15, 0.0, 4.0);
+    // shell, not fog) -- kept tight so correction engages almost
+    // immediately instead of letting a particle drift noticeably before
+    // attraction does anything, which read as "not holding the shape."
+    float pull = clamp(abs(dist) - 0.05, 0.0, 4.0);
     vec3 attraction = -sign(dist) * gradient * pull * attractionStrength;
 
     // Surface-parallel flow.

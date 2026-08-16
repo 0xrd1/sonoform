@@ -56,6 +56,21 @@ struct GpuEmitParams {
     Color colorB = WHITE;
     float size = 0.15f, sizeJitter = 0.0f;
     float life = 1.0f, lifeJitter = 0.0f;
+
+    // Life-differentiation for shape-attracted systems (see
+    // shapes/shape_conform.glsl's RecruitRoll / GpuForceDesc's
+    // ShapeConform recruitFraction, ForceFactory.h): the fraction of
+    // *this* emit call's particles that get `life`/`lifeJitter` above
+    // (the long-lived "core" that the ShapeConform force actually holds
+    // onto the shape) versus `shedLife`/`shedLifeJitter` (short-lived,
+    // sheds off as haze). Both the force's recruit check and this one
+    // are derived from the same deterministic per-particle hash (see
+    // common/recruit.glsl), so they can never disagree for a given
+    // particle. Defaults to 1.0 -- every particle gets `life`, shedLife
+    // unused -- i.e. today's behavior for every emitter that doesn't set
+    // this (only NeonFogVisualizer does).
+    float recruitFraction = 1.0f;
+    float shedLife = 1.0f, shedLifeJitter = 0.0f;
 };
 
 // One GPU-simulated, GPU-rendered particle pool: owns its SSBOs and force
