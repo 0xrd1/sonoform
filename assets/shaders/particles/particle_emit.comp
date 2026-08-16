@@ -111,5 +111,8 @@ void main() {
     particles[idx].positionLife = vec4(pos, life);
     particles[idx].velocitySize = vec4(vel, size);
     particles[idx].color = color;
-    particles[idx].params = vec4(life, float(rng), 0.0, 0.0);
+    // w = shade factor, defaults to fully lit (1.0) so a particle isn't a
+    // black flash for the one frame between spawn and its first sim tick
+    // -- see particle_types.glsl and particle_sim.comp's uHasShapeField.
+    particles[idx].params = vec4(life, float(rng), 0.0, 1.0);
 }

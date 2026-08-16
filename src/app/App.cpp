@@ -100,7 +100,11 @@ bool App::Init(const std::string& audioPathArg) {
     camera_.projection = CAMERA_PERSPECTIVE;
     camera_.target = { 0, 2.0f, 0 };
     camYaw_ = 0.0f;
-    camPitch_ = 0.35f;
+    // Steeper than a typical orbit-camera default: at a shallow pitch the
+    // VoidFloor (see gfx/VoidFloor.h) recedes toward the horizon almost
+    // immediately and mostly falls below the frame -- this angle keeps a
+    // meaningful amount of the floor/grid visible alongside the fog.
+    camPitch_ = 0.55f;
     camDistance_ = 20.0f;
 
     return true;
@@ -202,7 +206,7 @@ void App::HandleInput(float dt) {
     if (IsKeyPressed(KEY_C)) autoRotate_ = !autoRotate_;
     if (IsKeyPressed(KEY_R)) {
         camYaw_ = 0.0f;
-        camPitch_ = 0.35f;
+        camPitch_ = 0.55f;
         camDistance_ = 20.0f;
     }
     if (IsKeyPressed(KEY_F)) ToggleFullscreen();

@@ -6,6 +6,7 @@
 #include "ProceduralShapes.h"
 #include "LightningSystem.h"
 #include "AudioAnalyzer.h"
+#include "VoidFloor.h"
 
 // A dense fog volume lit from within, rather than self-luminous. Real
 // smoke/fog VFX is rendered with a neutral (near-grey) particle albedo
@@ -34,6 +35,17 @@
 //   - LightningSystem: fractal bolts that fire on intense music, drawn
 //     additively (bolts genuinely are light-emitting) and contributing
 //     their own transient lights alongside the core light.
+//   - VoidFloor: a dark "stage" (floor, glowing grid, contact shadow, and
+//     a genuine second overhead LightSample) so the fog reads as a
+//     character occupying real 3D space, not a sprite cloud on flat
+//     black -- see gfx/VoidFloor.h.
+// The ShapeField's gradient also doubles as a cheap surface normal for a
+// fake volumetric self-shadow (GpuParticleSystem::SetShading, sampled
+// per-particle in particle_sim.comp) -- the side of the structure facing
+// the overhead light reads brighter than the far side, which combined
+// with the noise-broken sprite alpha (particle_render.frag) is what makes
+// this read as a lit volume rather than a field of flat, uniform discs.
+// Palette is cool blue/white (Tron Legacy), not the earlier violet.
 // Audio drives lighting only: the core light's color/intensity and
 // lightning both pulse with musical swells. Shape attraction is
 // deliberately independent of audio -- morphStrength eases toward
@@ -61,6 +73,7 @@ private:
     std::unique_ptr<ShapeField> shapeField_;
     std::unique_ptr<ProceduralShapeProvider> shapeProvider_;
     LightningSystem lightning_;
+    VoidFloor floor_;
 
     int gravityForceIndex_ = -1;
     int turbulenceForceIndex_ = -1;
@@ -86,6 +99,12 @@ private:
     float spawnAccumulator_ = 0.0f;
     float beatFlash_ = 0.0f;
     float lightningCooldown_ = 0.0f;
+
+    // Cached from FrameContext::time each Update(), for Draw() (const, no
+    // FrameContext of its own) to feed particle_render.frag's sprite-noise
+    // time drift and, in principle, anything else Draw() later needs the
+    // current time for.
+    float lastTime_ = 0.0f;
 
     // The fog's primary light source, updated in Update() (audio-driven
     // color/intensity) and read in Draw() (const) -- see the class

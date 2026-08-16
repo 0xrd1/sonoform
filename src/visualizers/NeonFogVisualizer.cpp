@@ -14,8 +14,11 @@ namespace {
 // in noise.glsl. Because particles now spawn already on/near the current
 // shape's surface (see kShapeCandidateHalfExtent) instead of filling a
 // large ambient volume, far fewer are needed for a dense, legible result
-// than the old "big diffuse box" approach required.
-constexpr int kFogCapacity = 150000;
+// than the old "big diffuse box" approach required. Raised well past that
+// iteration's 150000 once the real fix for sprite legibility (noise-broken
+// alpha in particle_render.frag, not raw count) landed and confirmed
+// headroom at 60fps -- see NeonFogVisualizer.h's class comment.
+constexpr int kFogCapacity = 400000;
 constexpr int kShapeGridResolution = 40;
 // Grid half-extent must comfortably exceed the largest shape's radius
 // (~3.5, the torus) plus the emission candidate box below it, or samples
@@ -54,6 +57,28 @@ constexpr float kShapeCandidateHalfExtent = 3.5f;
 
 // How long a shape holds before auto-cycling to the next one.
 constexpr float kShapeCycleSeconds = 6.0f;
+
+// The environment/stage (see gfx/VoidFloor.h): a floor well below the fog
+// volume (which normally spans roughly y in [-1.5, 6] around fieldCenter_)
+// so it's visibly a separate, distant surface, plus a genuine second light
+// source -- distinct from the internal core light -- positioned high above
+// so it acts like an overhead key light, giving the fog real directional
+// shading (see GpuParticleSystem::SetShading) instead of only the core
+// light's inverse-square falloff.
+// Close enough below the fog's typical extent (roughly y in [-1.5, 6]
+// around fieldCenter_) to read as clearly separate, but not so far that
+// the camera's default pitch (see App::Init) puts it below the frame --
+// at a shallow viewing angle a ground plane recedes toward the horizon
+// far faster than its raw distance below the subject suggests.
+constexpr float kFloorY = -2.2f;
+const Vector3 kOverheadLightPos{ 1.5f, 16.0f, -3.0f };
+constexpr float kOverheadLightIntensity = 3.0f;
+// Cool near-white -- Tron Legacy palette, not the fog's own violet-free
+// blue tint (see the core light / albedo colors in Update()).
+const Color kOverheadLightColor = ColorFromHSV(200.0f, 0.15f, 1.0f);
+// Keeps the self-shadowed side of the structure dim, not pure black --
+// still reads as fog, not a hard-shaded solid.
+constexpr float kShadeAmbientFloor = 0.35f;
 }
 
 void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer) {
@@ -69,6 +94,14 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
     fog_->AddForce(gpu_force::Drag(0.8f));
     shapeConformForceIndex_ = fog_->AddForce(
         gpu_force::ShapeConform(kShapeAttraction, kShapeCurl, 0.0f, kShapeRecruitFraction));
+
+    // Fake self-shadow shading direction matches the overhead key light's
+    // actual angle, so the floor's light pool (gfx/VoidFloor) and the
+    // fog's own brighter/dimmer sides agree on where "up toward the
+    // light" is.
+    fog_->SetShading(Vector3Subtract(kOverheadLightPos, fieldCenter_), kShadeAmbientFloor);
+
+    floor_.Init(shaders);
 }
 
 void NeonFogVisualizer::Update(const FrameContext& frame) {
@@ -102,12 +135,14 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     beatFlash_ = std::max(0.0f, beatFlash_ - frame.dt * 2.0f);
 
     // The core light: the fog's one persistent light source, positioned
-    // at the shape's center. Bass pulls its hue toward magenta, treble
-    // toward cyan; energy and beat flashes drive its intensity. This is
-    // what actually colors the fog (see the class comment) -- particle
-    // albedo itself stays close to neutral.
-    float coreHue = 285.0f - frame.audio.Bass() * 40.0f + frame.audio.Treble() * 30.0f;
-    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), 0.75f, 1.0f);
+    // at the shape's center. Bass/treble nudge its hue within the cool
+    // cyan-blue family (Tron Legacy palette, not the earlier violet);
+    // energy and beat flashes drive its intensity, and lower saturation
+    // than before means a bright swell pushes toward white rather than
+    // staying a saturated color. This is what actually colors the fog
+    // (see the class comment) -- particle albedo itself stays neutral.
+    float coreHue = 200.0f - frame.audio.Bass() * 15.0f + frame.audio.Treble() * 20.0f;
+    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), 0.55f, 1.0f);
     coreLightIntensity_ = (1.5f + frame.audio.Energy() * 4.0f + beatFlash_ * 2.5f) * frame.intensity;
 
     // Emission: every particle is born already on (or just off) the
@@ -125,8 +160,9 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     // class comment: that migration is the actual "attraction" this
     // pipeline exists to prove). Constant/not audio-driven -- see the
     // class comment. Paced so steady-state population (spawnRate * life)
-    // sits well under kFogCapacity: 18000 * 6 = 108000 of 150000.
-    constexpr float kSpawnRate = 18000.0f;
+    // sits well under kFogCapacity: 50000 * 6 = 300000 of 400000, leaving
+    // headroom for transition bursts.
+    constexpr float kSpawnRate = 50000.0f;
     spawnAccumulator_ += frame.dt * kSpawnRate;
     int spawnCount = static_cast<int>(spawnAccumulator_);
     if (spawnCount > 0) {
@@ -142,21 +178,22 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
         ep.velocity = { 0, 0.08f, 0 };
         ep.velocityJitter = { 0.12f, 0.12f, 0.12f };
 
-        // Near-neutral albedo: low saturation, moderate-low value, with
-        // only the faintest violet/cyan tinge as the "material" color.
+        // Near-neutral albedo: low saturation, moderate-low value, both
+        // cool blue (Tron Legacy palette -- no violet anywhere anymore).
         // Visible color overwhelmingly comes from the core light and
         // lightning via the light-boost in particle_render.vert, not
         // from this base -- see the class comment for why.
-        ep.colorA = ColorFromHSV(275.0f, 0.12f, 0.16f);
-        ep.colorB = ColorFromHSV(190.0f, 0.12f, 0.14f);
+        ep.colorA = ColorFromHSV(205.0f, 0.10f, 0.20f);
+        ep.colorB = ColorFromHSV(195.0f, 0.06f, 0.28f);
 
-        // Small: with particles already concentrated on the surface (not
-        // spread through a large ambient volume), a large sprite radius
-        // is what turns a legible silhouette into a soft blob. Small,
-        // dense, overlapping sprites read as a detailed structured
-        // surface instead under alpha blending.
-        ep.size = 0.35f;
-        ep.sizeJitter = 0.15f;
+        // Small and dense rather than large and sparse: individually
+        // visible circles is a sprite-shape problem, not just a size
+        // problem (see particle_render.frag's noise-broken alpha mask),
+        // but sprites this small still need heavy overlap to read as
+        // continuous fog texture instead of scattered wisps -- that
+        // overlap is what the higher kFogCapacity/kSpawnRate above buys.
+        ep.size = 0.16f;
+        ep.sizeJitter = 0.07f;
         // Short enough for fast turnover (a shape change reads within
         // roughly one lifetime) but long enough for shed (unrecruited)
         // particles to visibly drift as haze before dying.
@@ -177,13 +214,25 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     if (fireLightning) lightningCooldown_ = 0.1f;
 
     fog_->Update(frame.dt, frame.time);
+    lastTime_ = frame.time; // Draw() is const with no FrameContext of its own -- see the member's comment
 }
 
 void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
-    // Core light always occupies slot 0; lightning bolts fill the rest.
+    // The stage: drawn first as opaque background geometry (default blend,
+    // depth test+write on) so the fog correctly blends over it afterward
+    // (ParticleRenderer::Draw disables depth *write* but keeps the test).
+    VoidFloor::Params floorParams;
+    floorParams.center = { fieldCenter_.x, kFloorY, fieldCenter_.z };
+    floorParams.shapeSampleY = fieldCenter_.y;
+    floorParams.lightPoolCenter = floorParams.center; // pool sits under the overhead light, which is above fieldCenter_
+    floor_.Draw(floorParams, shapeField_.get());
+
+    // Core light occupies slot 0, the overhead key light slot 1; lightning
+    // bolts fill the rest.
     std::array<LightSample, kMaxParticleLights> lights{};
     lights[0] = LightSample{ fieldCenter_, coreLightIntensity_, coreLightColor_ };
-    int lightCount = 1 + lightning_.GatherLights(lights.data() + 1, kMaxParticleLights - 1);
+    lights[1] = LightSample{ kOverheadLightPos, kOverheadLightIntensity, kOverheadLightColor };
+    int lightCount = 2 + lightning_.GatherLights(lights.data() + 2, kMaxParticleLights - 2);
 
     // Standard alpha blending, not additive: the fog is meant to read as
     // a gas being lit, not a self-luminous energy cloud -- see the class
@@ -195,7 +244,7 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     BeginBlendMode(BLEND_ALPHA);
     if (fog_) {
         fog_->Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, /*fadeMode=*/1, /*sizeScale=*/1.0f,
-                   lights.data(), lightCount);
+                   lights.data(), lightCount, lastTime_);
     }
     EndBlendMode();
 
@@ -213,7 +262,6 @@ const char* ShapeName(ProceduralShapeType type) {
         case ProceduralShapeType::Box: return "Box";
         case ProceduralShapeType::Torus: return "Torus";
         case ProceduralShapeType::Cylinder: return "Cylinder";
-        case ProceduralShapeType::Head: return "Head";
     }
     return "?";
 }
@@ -229,16 +277,20 @@ const char* NeonFogVisualizer::ExtraStatusLine() const {
 }
 
 void NeonFogVisualizer::CycleShapePreset() {
-    // Walks Sphere -> Box -> Torus -> Cylinder -> Head -> Sphere ...
-    // Never disables the shape entirely -- to see pure ambient fog, drive
-    // morphForce_ to 0 via '-' instead (see AdjustPrimary); 'M' separately
-    // toggles whether this cycle advances on its own.
+    // Walks Sphere -> Box -> Torus -> Cylinder -> Sphere ... Never disables
+    // the shape entirely -- to see pure ambient fog, drive morphForce_ to
+    // 0 via '-' instead (see AdjustPrimary); 'M' separately toggles
+    // whether this cycle advances on its own.
+    //
+    // No Head/face shape here -- an earlier crude analytic stand-in was
+    // removed; the real thing comes later via a mesh-driven
+    // MeshShapeProvider (see shapes/ShapeProvider.h), not an approximate
+    // SDF baked in shape_bake.comp.
     switch (shapeProvider_->Type()) {
         case ProceduralShapeType::Sphere: shapeProvider_->SetType(ProceduralShapeType::Box); break;
         case ProceduralShapeType::Box: shapeProvider_->SetType(ProceduralShapeType::Torus); break;
         case ProceduralShapeType::Torus: shapeProvider_->SetType(ProceduralShapeType::Cylinder); break;
-        case ProceduralShapeType::Cylinder: shapeProvider_->SetType(ProceduralShapeType::Head); break;
-        case ProceduralShapeType::Head: shapeProvider_->SetType(ProceduralShapeType::Sphere); break;
+        case ProceduralShapeType::Cylinder: shapeProvider_->SetType(ProceduralShapeType::Sphere); break;
     }
 
     shapeProvider_->BakeInto(*shapeField_, 0.0f);

@@ -16,6 +16,15 @@ uniform float uTime;
 uniform vec4 uImpulseCenter;  // xyz = center, w = strength
 uniform vec4 uImpulseRadius;  // x = max radius, y = active (0 or 1)
 
+// Fake volumetric self-shadow (see GpuParticleSystem::SetShading): when
+// this system has a ShapeField bound, its gradient doubles as a cheap
+// surface normal so particles facing the key light read brighter than
+// particles on the far side -- the thing that actually makes the fog
+// look like a lit volume instead of a flat-shaded sprite cloud.
+uniform int uHasShapeField;
+uniform vec3 uShadeLightDir;      // normalized, points FROM the structure TOWARD the key light
+uniform float uShadeAmbientFloor; // floor so the shadowed side stays dim, not pure black
+
 void main() {
     uint id = gl_GlobalInvocationID.x;
     if (id >= uCapacity) return;
@@ -28,6 +37,12 @@ void main() {
     vec3 vel = p.velocitySize.xyz;
 
     vec3 accel = ApplyForces(pos, vel, uDt, uTime, uForceCount, p.params.y);
+
+    if (uHasShapeField != 0) {
+        vec4 fieldSample = SampleShapeField(pos);
+        vec3 n = length(fieldSample.xyz) > 0.0001 ? normalize(fieldSample.xyz) : vec3(0.0, 1.0, 0.0);
+        p.params.w = clamp(dot(n, uShadeLightDir) * 0.5 + 0.5, uShadeAmbientFloor, 1.0);
+    }
 
     if (uImpulseRadius.y > 0.5) {
         vec3 diff = pos - uImpulseCenter.xyz;

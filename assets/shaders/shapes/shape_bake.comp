@@ -19,7 +19,6 @@ uniform int uShapeType;
 #define SHAPE_BOX      1
 #define SHAPE_TORUS    2
 #define SHAPE_CYLINDER 3
-#define SHAPE_HEAD     4
 
 float sdSphere(vec3 p, float r) {
     return length(p) - r;
@@ -40,47 +39,11 @@ float sdTorus(vec3 p, vec2 t) {
     return length(q) - t.y;
 }
 
-float sdEllipsoid(vec3 p, vec3 r) {
-    float k0 = length(p / r);
-    float k1 = length(p / (r * r));
-    return k0 * (k0 - 1.0) / k1;
-}
-
-float smin(float a, float b, float k) {
-    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return mix(b, a, h) - k * h * (1.0 - h);
-}
-
-// A crude analytic "head-like" blob built from smooth boolean ops on
-// simple primitives: an ellipsoid skull, two carved eye-socket
-// depressions, a brow-ridge bulge, and a nose bump. Not anatomically
-// precise -- it exists to prove the shape-conform pipeline end-to-end
-// with a recognizable head silhouette, standing in for a future
-// MeshShapeProvider driven by real face-tracking data (see
-// shapes/ShapeProvider.h).
-float sdHead(vec3 p) {
-    float head = sdEllipsoid(p, vec3(2.2, 2.6, 2.3));
-
-    float eyeL = sdSphere(p - vec3(-0.9, 0.4, 1.8), 0.7);
-    float eyeR = sdSphere(p - vec3(0.9, 0.4, 1.8), 0.7);
-    head = max(head, -eyeL + 0.3);
-    head = max(head, -eyeR + 0.3);
-
-    float brow = sdEllipsoid(p - vec3(0.0, 1.1, 1.9), vec3(1.6, 0.35, 0.5));
-    head = smin(head, brow, 0.3);
-
-    float nose = sdEllipsoid(p - vec3(0.0, -0.1, 2.3), vec3(0.4, 0.6, 0.6));
-    head = smin(head, nose, 0.4);
-
-    return head;
-}
-
 float EvalShape(vec3 p) {
     if (uShapeType == SHAPE_SPHERE) return sdSphere(p, 3.0);
     if (uShapeType == SHAPE_BOX) return sdRoundBox(p, vec3(2.4, 2.4, 2.4), 0.4);
     if (uShapeType == SHAPE_TORUS) return sdTorus(p, vec2(2.5, 1.0));
-    if (uShapeType == SHAPE_CYLINDER) return sdCappedCylinder(p, 2.6, 2.0);
-    return sdHead(p);
+    return sdCappedCylinder(p, 2.6, 2.0);
 }
 
 void main() {

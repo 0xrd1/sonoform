@@ -86,6 +86,17 @@ public:
     // field pointer is not owned.
     void SetShapeField(ShapeField* field) { shapeField_ = field; }
 
+    // Fake volumetric self-shadow: whenever a ShapeField is bound, Update()
+    // samples its gradient each frame as a stand-in surface normal and
+    // writes a light-facing factor into each particle's Particle.params.w
+    // (see particle_sim.comp), which particle_render.vert multiplies into
+    // the base color. `lightDir` should point FROM the structure TOWARD
+    // the key light; normalized on store. `ambientFloor` keeps the
+    // shadowed side dim rather than pure black. No effect on systems that
+    // never call SetShapeField. Call once after setup, or whenever the
+    // light changes -- see NeonFogVisualizer::Init.
+    void SetShading(Vector3 lightDir, float ambientFloor);
+
     // Spawns `count` particles per the given parameters. Silently drops
     // any that don't fit (pool at capacity), matching the old CPU
     // ParticleSystem::Emit's behavior.
@@ -106,7 +117,8 @@ public:
     // particles from within; see gfx/LightSample.h.
     void Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode = 0, float sizeScale = 1.0f,
-              const LightSample* lights = nullptr, int lightCount = 0) const;
+              const LightSample* lights = nullptr, int lightCount = 0,
+              float time = 0.0f) const;
 
     int Capacity() const { return capacity_; }
 
@@ -142,6 +154,9 @@ private:
     unsigned int emitSeedCounter_ = 1;
 
     ShapeField* shapeField_ = nullptr; // not owned; see SetShapeField
+
+    Vector3 shadingLightDir_{ 0, 1, 0 };
+    float shadingAmbientFloor_ = 1.0f; // 1.0 = no-op (no darkening) until SetShading is called
 
     Vector3 pendingImpulseCenter_{ 0, 0, 0 };
     float pendingImpulseStrength_ = 0.0f;

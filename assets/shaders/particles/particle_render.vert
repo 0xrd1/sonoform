@@ -21,6 +21,7 @@ uniform int uLightCount;
 
 out vec2 vUv;
 out vec4 vColor;
+out vec2 vSeedOffset;
 
 // A camera-facing quad (2 triangles, 6 vertices) generated purely from
 // gl_VertexID -- no vertex buffer exists. Combined with gl_InstanceID
@@ -50,6 +51,7 @@ void main() {
         gl_Position = vec4(0.0);
         vUv = vec2(0.0);
         vColor = vec4(0.0);
+        vSeedOffset = vec2(0.0);
         return;
     }
 
@@ -78,7 +80,22 @@ void main() {
         lightBoost += uLightColors[i].rgb * falloff;
     }
 
+    // Fake volumetric self-shadow: a light-facing factor baked into
+    // params.w by particle_sim.comp from the ShapeField's gradient (acting
+    // as a surface normal) when this system has one bound -- see the
+    // uHasShapeField block there. Defaults to 1.0 (no darkening) for
+    // particles that never get it computed, so this is a pure no-op for
+    // any system without a bound ShapeField. Applied only to the
+    // particle's own base color, not lightBoost, which already models
+    // real point lights independently.
+    float shade = p.params.w;
+
     gl_Position = uViewProj * vec4(worldPos, 1.0);
     vUv = corner + 0.5;
-    vColor = vec4(p.color.rgb + lightBoost, p.color.a * FadeCurve(lifeRatio));
+    // Per-particle offset into the noise field used by particle_render.frag
+    // to break up the sprite's silhouette -- derived from the particle's
+    // own rng seed so neighboring particles don't show an identical
+    // pattern (which would look like a tiled texture instead of fog).
+    vSeedOffset = vec2(fract(p.params.y * 0.1031), fract(p.params.y * 0.2947)) * 37.0;
+    vColor = vec4(p.color.rgb * shade + lightBoost, p.color.a * FadeCurve(lifeRatio));
 }

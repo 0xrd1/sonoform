@@ -6,11 +6,14 @@
 #include "GlCompat.h"
 #include "GlUniforms.h"
 #include "rlgl.h"
+#include "raymath.h"
 
 #include <vector>
 
 using gl_uniforms::SetFloat;
+using gl_uniforms::SetInt;
 using gl_uniforms::SetUint;
+using gl_uniforms::SetVec3;
 using gl_uniforms::SetVec4;
 
 GpuParticleSystem::GpuParticleSystem(ShaderLibrary& shaders, ParticleRenderer& renderer, int capacity)
@@ -99,6 +102,11 @@ void GpuParticleSystem::Emit(const GpuEmitParams& params, int count) {
     gl_compat::ShaderStorageBarrier();
 }
 
+void GpuParticleSystem::SetShading(Vector3 lightDir, float ambientFloor) {
+    shadingLightDir_ = Vector3Normalize(lightDir);
+    shadingAmbientFloor_ = ambientFloor;
+}
+
 void GpuParticleSystem::ApplyRadialImpulse(Vector3 center, float strength, float maxRadius) {
     pendingImpulseCenter_ = center;
     pendingImpulseStrength_ = strength;
@@ -133,6 +141,14 @@ void GpuParticleSystem::Update(float dt, float time) {
     particleBuffer_.BindBase(gpu_bindings::kParticleBuffer);
     freeListBuffer_.BindBase(gpu_bindings::kFreeListBuffer);
     if (!forces_.empty()) forceBuffer_.BindBase(gpu_bindings::kForceBuffer);
+
+    // Fake volumetric self-shadow (see SetShading): only meaningful, and
+    // only costs a per-particle SSBO sample, when this system actually has
+    // a ShapeField bound.
+    int hasShapeField = (shapeField_ != nullptr) ? 1 : 0;
+    SetInt(simProgram_, "uHasShapeField", hasShapeField);
+    SetVec3(simProgram_, "uShadeLightDir", shadingLightDir_.x, shadingLightDir_.y, shadingLightDir_.z);
+    SetFloat(simProgram_, "uShadeAmbientFloor", shadingAmbientFloor_);
     if (shapeField_ != nullptr) shapeField_->BindForSampling(simProgram_);
 
     unsigned int groups = (static_cast<unsigned int>(capacity_) + 63u) / 64u;
@@ -169,7 +185,7 @@ void GpuParticleSystem::DebugDumpFirst(int count) const {
 
 void GpuParticleSystem::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                               int fadeMode, float sizeScale,
-                              const LightSample* lights, int lightCount) const {
+                              const LightSample* lights, int lightCount, float time) const {
     particleBuffer_.BindBase(gpu_bindings::kParticleBuffer);
-    renderer_.Draw(capacity_, viewProj, cameraRight, cameraUp, fadeMode, sizeScale, lights, lightCount);
+    renderer_.Draw(capacity_, viewProj, cameraRight, cameraUp, fadeMode, sizeScale, lights, lightCount, time);
 }
