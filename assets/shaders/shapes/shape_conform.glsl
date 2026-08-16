@@ -1,0 +1,55 @@
+// Applies the "conform to shape field" force: attraction along the SDF
+// gradient toward the surface, plus a curl-noise-modulated tangential
+// flow that keeps particles sliding along the surface instead of
+// freezing on it. This is the production VFX technique (Houdini,
+// Unity VFX Graph's Conform-to-SDF) for a shape that reads as
+// *suggested* by flowing particles rather than a rigid, solid point
+// cloud: taking the curl of (SDF-gradient * noise) yields a
+// divergence-free velocity field that is, near the surface,
+// approximately tangential to it.
+#include "shape_field_sample.glsl"
+#include "noise.glsl"
+
+// Fraction of particles that ever respond to shape conforming, regardless
+// of morphStrength. Without this, morphStrength=1 pulls literally every
+// particle onto the (comparatively small) shape surface at once, which
+// oversaturates into a solid blob under additive blending and reads as a
+// rigid point cloud -- exactly what the VFX technique in the module
+// comment above is meant to avoid. Recruiting only a subset keeps the
+// rest as permanent ambient fog, so the shape is always suggested by a
+// portion of the particles, never all of them.
+const float kShapeRecruitFraction = 0.35;
+
+// b.x = attraction strength, b.y = curl-flow strength, b.z = morphStrength
+// (0 = fully ignore the field -- particles behave as free-floating fog --
+// 1 = fully pulled toward/along the shape, for the ~35% of particles
+// recruited below). Only a ForceDesc of type FORCE_SHAPE_CONFORM invokes
+// this (see forces.glsl); other particle systems never call it and never
+// touch the ShapeField buffer.
+vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, float morphStrength, float time, float particleSeed) {
+    if (morphStrength <= 0.0001) return vec3(0.0);
+
+    // Deterministic per-particle recruitment from the particle's own rng
+    // seed (stable for that particle's whole lifetime -- it doesn't
+    // flicker between recruited/not from frame to frame).
+    float recruit = fract(particleSeed * 0.6180339887);
+    if (recruit > kShapeRecruitFraction) return vec3(0.0);
+
+    vec4 fieldSample = SampleShapeField(pos);
+    vec3 gradient = fieldSample.xyz;
+    float dist = fieldSample.w;
+
+    // Pull toward the surface: outside (dist>0) pulls inward along
+    // -gradient, inside (dist<0) pushes outward along +gradient. A soft
+    // deadband near the surface keeps particles hovering/orbiting it
+    // instead of pinning exactly onto it (which would look like a solid
+    // shell, not fog).
+    float pull = clamp(abs(dist) - 0.15, 0.0, 4.0);
+    vec3 attraction = -sign(dist) * gradient * pull * attractionStrength;
+
+    // Surface-parallel flow.
+    float n = ValueNoise3D(pos * 0.6 + vec3(0.0, 0.0, time * 0.15));
+    vec3 flow = CurlNoise3D(gradient * n * 3.0, time * 0.2) * curlStrength;
+
+    return (attraction + flow) * morphStrength;
+}

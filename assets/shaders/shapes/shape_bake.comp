@@ -1,0 +1,85 @@
+#version 430
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(std430, binding = 3) buffer ShapeFieldBuffer {
+    vec4 shapeField[]; // xyz = gradient, w = signed distance
+};
+
+uniform ivec3 uGridDim;
+uniform vec3 uGridCenter;
+uniform float uGridHalfExtent;
+uniform int uShapeType;
+
+#define SHAPE_SPHERE 0
+#define SHAPE_TORUS  1
+#define SHAPE_HEAD   2
+
+float sdSphere(vec3 p, float r) {
+    return length(p) - r;
+}
+
+float sdTorus(vec3 p, vec2 t) {
+    vec2 q = vec2(length(p.xz) - t.x, p.y);
+    return length(q) - t.y;
+}
+
+float sdEllipsoid(vec3 p, vec3 r) {
+    float k0 = length(p / r);
+    float k1 = length(p / (r * r));
+    return k0 * (k0 - 1.0) / k1;
+}
+
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// A crude analytic "head-like" blob built from smooth boolean ops on
+// simple primitives: an ellipsoid skull, two carved eye-socket
+// depressions, a brow-ridge bulge, and a nose bump. Not anatomically
+// precise -- it exists to prove the shape-conform pipeline end-to-end
+// with a recognizable head silhouette, standing in for a future
+// MeshShapeProvider driven by real face-tracking data (see
+// shapes/ShapeProvider.h).
+float sdHead(vec3 p) {
+    float head = sdEllipsoid(p, vec3(2.2, 2.6, 2.3));
+
+    float eyeL = sdSphere(p - vec3(-0.9, 0.4, 1.8), 0.7);
+    float eyeR = sdSphere(p - vec3(0.9, 0.4, 1.8), 0.7);
+    head = max(head, -eyeL + 0.3);
+    head = max(head, -eyeR + 0.3);
+
+    float brow = sdEllipsoid(p - vec3(0.0, 1.1, 1.9), vec3(1.6, 0.35, 0.5));
+    head = smin(head, brow, 0.3);
+
+    float nose = sdEllipsoid(p - vec3(0.0, -0.1, 2.3), vec3(0.4, 0.6, 0.6));
+    head = smin(head, nose, 0.4);
+
+    return head;
+}
+
+float EvalShape(vec3 p) {
+    if (uShapeType == SHAPE_SPHERE) return sdSphere(p, 3.0);
+    if (uShapeType == SHAPE_TORUS) return sdTorus(p, vec2(2.5, 1.0));
+    return sdHead(p);
+}
+
+void main() {
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    if (id.x >= uGridDim.x || id.y >= uGridDim.y || id.z >= uGridDim.z) return;
+
+    vec3 t = (vec3(id) + 0.5) / vec3(uGridDim); // [0,1] within the grid
+    vec3 p = uGridCenter + (t * 2.0 - 1.0) * uGridHalfExtent;
+
+    float d = EvalShape(p);
+
+    const float e = 0.05;
+    vec3 grad = normalize(vec3(
+        EvalShape(p + vec3(e, 0, 0)) - EvalShape(p - vec3(e, 0, 0)),
+        EvalShape(p + vec3(0, e, 0)) - EvalShape(p - vec3(0, e, 0)),
+        EvalShape(p + vec3(0, 0, e)) - EvalShape(p - vec3(0, 0, e))
+    ));
+
+    int index = id.x + id.y * uGridDim.x + id.z * uGridDim.x * uGridDim.y;
+    shapeField[index] = vec4(grad, d);
+}

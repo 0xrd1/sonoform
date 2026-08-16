@@ -1,0 +1,6 @@
+Drop an .mp3, .wav, .ogg, or .flac file in this folder and the engine will
+automatically load and visualize it (first file found is used). You can
+also pass a path explicitly: ParticleAudioEngine.exe path/to/song.mp3
+
+If this folder is empty, the engine synthesizes and plays a short
+procedural demo track instead, so it works out of the box.

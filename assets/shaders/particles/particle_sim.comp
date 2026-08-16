@@ -1,0 +1,58 @@
+#version 430
+layout(local_size_x = 64) in;
+
+#include "../common/particle_types.glsl"
+#include "../common/forces.glsl"
+
+uniform uint uCapacity;
+uniform uint uForceCount;
+uniform float uDt;
+uniform float uTime;
+
+// One-shot radial velocity kick, replacing the CPU
+// ParticleSystem::ApplyRadialImpulse call. Cleared to inactive (y=0) by the
+// CPU every frame and only set for the one frame an impulse (e.g. a beat
+// hit) actually fires.
+uniform vec4 uImpulseCenter;  // xyz = center, w = strength
+uniform vec4 uImpulseRadius;  // x = max radius, y = active (0 or 1)
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uCapacity) return;
+
+    Particle p = particles[id];
+    float life = p.positionLife.w;
+    if (life <= 0.0) return; // already dead/free; nothing to simulate
+
+    vec3 pos = p.positionLife.xyz;
+    vec3 vel = p.velocitySize.xyz;
+
+    vec3 accel = ApplyForces(pos, vel, uDt, uTime, uForceCount, p.params.y);
+
+    if (uImpulseRadius.y > 0.5) {
+        vec3 diff = pos - uImpulseCenter.xyz;
+        float dist = length(diff);
+        if (dist > 0.001 && dist < uImpulseRadius.x) {
+            float falloff = 1.0 - dist / uImpulseRadius.x;
+            vel += (diff / dist) * (uImpulseCenter.w * falloff);
+        }
+    }
+
+    vel += accel * uDt;
+    pos += vel * uDt;
+    life -= uDt;
+
+    if (life <= 0.0) {
+        // Return this slot to the free list so a future emit dispatch can
+        // reuse it. positionLife.w <= 0 also marks it dead for this frame's
+        // render pass (which runs before the next emit dispatch touches it).
+        int slot = atomicAdd(freeCount, 1);
+        freeIndices[slot] = int(id);
+        p.positionLife = vec4(pos, 0.0);
+    } else {
+        p.positionLife = vec4(pos, life);
+        p.velocitySize.xyz = vel;
+    }
+
+    particles[id] = p;
+}

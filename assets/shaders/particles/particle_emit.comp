@@ -1,0 +1,97 @@
+#version 430
+layout(local_size_x = 64) in;
+
+#include "../common/particle_types.glsl"
+#include "../common/random.glsl"
+
+// Mirrors the old CPU EmitParams (src/particles/ParticleSystem.h) plus one
+// addition: `mode` selects how position/velocity are randomized. The CPU
+// code expressed each of these as a different *call site* pattern (a
+// jittered-stream loop, FireworksVisualizer's uniform-sphere burst loop,
+// GalaxyVisualizer's per-particle orbital-velocity loop); a single GPU
+// emit dispatch has to express the same three patterns explicitly, but
+// gets to do all N particles' independent randomness in parallel instead
+// of N separate CPU Emit(..., 1) calls.
+#define EMIT_MODE_BOX    0  // velocity = base + box jitter
+#define EMIT_MODE_SPHERE 1  // velocity = uniform-random direction * [speedMin, speedMax]
+#define EMIT_MODE_ORBIT  2  // position on an annulus around uPosition; velocity = tangential orbital speed + jitter
+
+uniform vec4 uPosition;        // xyz = base position, w = mode
+uniform vec4 uPositionJitter;  // xyz = box half-extents (box/sphere), OR x=radiusMin,y=radiusMax,z=heightJitter (orbit)
+uniform vec4 uVelocityBase;    // xyz = base velocity (box mode); w = attractor strength (orbit mode)
+uniform vec4 uVelocityJitter;  // xyz = box half-extents (box), x=speedMin,y=speedMax (sphere), x=speedMultiplier,y=jitterAmount (orbit)
+uniform vec4 uColorA;
+uniform vec4 uColorB;
+uniform vec4 uSizeLifeJitter;  // x = size, y = sizeJitter, z = life, w = lifeJitter
+uniform uint uEmitCount;
+uniform uint uSeed;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= uEmitCount) return;
+
+    // Claim a free slot; if the pool is exhausted, give the count back and
+    // silently drop this particle — matches ParticleSystem::Emit's
+    // behavior of dropping excess emission once freeList_ is empty.
+    int slot = atomicAdd(freeCount, -1) - 1;
+    if (slot < 0) {
+        atomicAdd(freeCount, 1);
+        return;
+    }
+    uint idx = uint(freeIndices[slot]);
+
+    uint rng = uSeed * 2654435761u + tid * 747796405u + 2891336453u;
+
+    int mode = int(uPosition.w);
+    vec3 pos;
+    vec3 vel;
+    float colorT = Rand01(rng); // default: independent random lerp between uColorA/uColorB
+
+    if (mode == EMIT_MODE_SPHERE) {
+        pos = uPosition.xyz + RandBox(rng, uPositionJitter.xyz);
+        float speed = RandRange(rng, uVelocityJitter.x, uVelocityJitter.y);
+        vel = RandUnitSphere(rng) * speed;
+    } else if (mode == EMIT_MODE_ORBIT) {
+        float radius = RandRange(rng, uPositionJitter.x, uPositionJitter.y);
+        float angle = RandRange(rng, 0.0, 6.28318530718);
+        float height = RandRange(rng, -uPositionJitter.z, uPositionJitter.z);
+        vec3 localOffset = vec3(cos(angle) * radius, height, sin(angle) * radius);
+        pos = uPosition.xyz + localOffset;
+
+        // Deliberately *not* renormalized after dropping the y component,
+        // matching the CPU original's tangent construction exactly (see
+        // GalaxyVisualizer.cpp): when height jitter is nonzero this makes
+        // the tangent slightly shorter than unit length, so orbital speed
+        // is very slightly under the nominal value for off-plane spawns.
+        vec3 radial = normalize(localOffset);
+        vec3 tangent = vec3(-radial.z, 0.0, radial.x);
+
+        float attractorStrength = uVelocityBase.w;
+        float speedMultiplier = uVelocityJitter.x;
+        float orbitalSpeed = sqrt(max(0.1, attractorStrength) / radius) * speedMultiplier;
+        vel = tangent * orbitalSpeed + RandBox(rng, vec3(uVelocityJitter.y));
+
+        // Radius-driven color instead of a random lerp, so uColorA/uColorB
+        // read as "inner hue" / "outer hue" -- reproduces the CPU
+        // original's per-particle radius-based hue gradient (see
+        // GalaxyVisualizer.cpp), which a purely random lerp would lose
+        // now that spawn position is chosen in-shader instead of on the
+        // CPU per particle.
+        float radiusSpan = max(0.001, uPositionJitter.y - uPositionJitter.x);
+        colorT = clamp((radius - uPositionJitter.x) / radiusSpan, 0.0, 1.0);
+    } else {
+        pos = uPosition.xyz + RandBox(rng, uPositionJitter.xyz);
+        vel = uVelocityBase.xyz + RandBox(rng, uVelocityJitter.xyz);
+    }
+
+    vec4 color = mix(uColorA, uColorB, colorT);
+    color.a = 1.0;
+
+    float size = uSizeLifeJitter.x + RandRange(rng, -uSizeLifeJitter.y, uSizeLifeJitter.y);
+    float life = max(0.05, uSizeLifeJitter.z + RandRange(rng, -uSizeLifeJitter.w, uSizeLifeJitter.w));
+
+    particles[idx].positionLife = vec4(pos, life);
+    particles[idx].velocitySize = vec4(vel, size);
+    particles[idx].color = color;
+    particles[idx].params = vec4(life, float(rng), 0.0, 0.0);
+}
