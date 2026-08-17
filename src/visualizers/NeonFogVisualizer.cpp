@@ -98,10 +98,16 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
 
     // Delegates forces/shading/emission/sim-update to the emitter itself --
     // see ShapeFogEmitter::Update for the SDF-biased-spawn and recruited/
-    // shed-lifecycle reasoning that used to live inline here. Not
-    // audio-driven -- see the class comment.
+    // shed-lifecycle reasoning that used to live inline here. Shape
+    // attraction/morph itself is still never audio-driven (morphStrength_
+    // above comes purely from shapeSettings_.morphForce) -- but fog_.Update
+    // now also folds in Turbulence x Excitement/Treble (see
+    // FogAudioSettings) when fog_.audio.reactive, "destructive but
+    // resisted": audio can rough the fog up, never weaken its hold on the
+    // shape.
     fog_.Update(frame.dt, frame.time, *shapeField_, morphStrength_,
-                Vector3Subtract(lightingSettings_.overheadLightPos, shapeField_->Center()), lightingSettings_.shadeAmbientFloor);
+                Vector3Subtract(lightingSettings_.overheadLightPos, shapeField_->Center()), lightingSettings_.shadeAmbientFloor,
+                frame.audio);
 
     // Lightning: strong beats fire a bolt; a short cooldown keeps a burst
     // of rapid beats from spawning bolts on top of each other.
@@ -113,118 +119,35 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     lightning_.Update(frame.dt, shapeField_->Center(), fireLightning, lightningStrength, lightningSettings_);
     if (fireLightning) lightningCooldown_ = lightningSettings_.cooldownSeconds;
 
+    // Kick impulse: a separate hard-beat trigger/cooldown from lightning's
+    // (see FogAudioSettings::kickBeatThreshold -- kicks and bolts don't
+    // have to agree on what counts as "hard"), knocking particles loose
+    // near the field center on impact. Recruited particles wobble and get
+    // pulled back by Shape Attraction; shed ones fly off and despawn on
+    // schedule -- the "some particles get kicked out from a kick drum"
+    // feel, without ever touching the forces that hold the silhouette
+    // together.
+    kickCooldown_ = std::max(0.0f, kickCooldown_ - frame.dt);
+    if (fog_.audio.reactive) {
+        bool hardBeat = frame.audio.BeatTriggered() && frame.audio.BeatIntensity() > fog_.audio.kickBeatThreshold;
+        if (hardBeat && kickCooldown_ <= 0.0f) {
+            fog_.KickImpulse(shapeField_->Center(), fog_.audio.kickImpulseStrength, fog_.audio.kickImpulseRadius);
+            kickCooldown_ = fog_.audio.kickCooldownSeconds;
+        }
+    }
+
     lastTime_ = frame.time; // Draw() is const with no FrameContext of its own -- see the member's comment
 }
 
 namespace {
-// Shared by both the Shape Bounds wireframe and the Force Vectors gizmo,
-// so both sample the field at the same points and only one direction-
-// generation exists.
+// Sample-direction grid for the Force Vectors gizmo (see the
+// showForceVectors block below). Shape Bounds no longer needs a shared
+// direction set -- it's drawn directly by the shape provider (see
+// IShapeProvider::DrawDebugWireframe / ProceduralShapeProvider's
+// override), which knows its own exact geometry instead of resampling
+// the baked field into an approximation.
 constexpr int kGizmoLatSteps = 6;
 constexpr int kGizmoLonSteps = 8;
-
-// Raymarches from the grid edge inward toward `center` along `dir`
-// (sphere-tracing against the real field: each step advances by the
-// current sample's |distance|, a safe conservative step since these SDFs
-// are exact, not just bounds), stopping at the first sign flip
-// (outside -> inside) and bisecting a few more steps for a clean point.
-// Starting from the edge and marching inward -- rather than assuming
-// `center` itself is inside the shape -- is what makes this correct for
-// every baked shape including Torus, whose own center point is actually
-// *outside* the tube (dist ~= +1.5 there); an outward-from-center march
-// would need special-casing per shape type, exactly the kind of
-// per-shape hardcoding this function exists to eliminate. Returns false
-// (leaves `outHit` untouched) if the ray never crosses within the grid's
-// extent.
-bool RaymarchToSurface(const ShapeField& field, Vector3 center, Vector3 dir, float startRadius, Vector3& outHit) {
-    constexpr int kMaxSteps = 48;
-    constexpr float kMinStep = 0.02f;
-
-    float t = startRadius;
-    ShapeField::FieldSample prev = field.SampleWorld(center + Vector3Scale(dir, t));
-    if (prev.distance <= 0.0f) {
-        outHit = center + Vector3Scale(dir, t);
-        return true;
-    }
-
-    for (int i = 0; i < kMaxSteps && t > 0.0f; i++) {
-        float step = fmaxf(prev.distance, kMinStep);
-        float nextT = fmaxf(t - step, 0.0f);
-        ShapeField::FieldSample cur = field.SampleWorld(center + Vector3Scale(dir, nextT));
-        if (cur.distance <= 0.0f) {
-            // Bisect between the last outside sample (t) and this inside
-            // one (nextT) for a cleaner crossing point.
-            float lo = nextT, hi = t;
-            for (int b = 0; b < 6; b++) {
-                float mid = (lo + hi) * 0.5f;
-                float d = field.SampleWorld(center + Vector3Scale(dir, mid)).distance;
-                if (d <= 0.0f) lo = mid; else hi = mid;
-            }
-            outHit = center + Vector3Scale(dir, (lo + hi) * 0.5f);
-            return true;
-        }
-        t = nextT;
-        prev = cur;
-        if (t <= 0.0f) break;
-    }
-    return false;
-}
-
-// Latitude/longitude wireframe of the ShapeField's actual zero-isosurface
-// -- replaces a previous hardcoded-per-shape-type primitive draw
-// (DrawSphereWires/DrawCubeWiresV/DrawCircle3D/DrawCylinderWires) that
-// silently drifted out of sync with shape_bake.comp's real dimensions
-// once already (a stale box half-extent -- the corner-rounding radius
-// expands a round box's flat-face surface *outward*, not just fillets
-// the corners inward, so the old hardcoded half-extent undersized the
-// wire by the rounding radius on every face). This version never
-// hardcodes a shape's geometry -- it only ever raymarches the field
-// itself, so it's automatically correct for any baked field, procedural
-// or (later) a real face mesh via MeshShapeProvider.
-void DrawFieldWireframe(const ShapeField& field, Color color) {
-    Vector3 center = field.Center();
-    float startRadius = field.HalfExtent();
-
-    // Interior rings, indexed [lat 1..kGizmoLatSteps-1][lon]; poles held
-    // separately since they're single points shared by every meridian.
-    Vector3 ringPoints[kGizmoLatSteps][kGizmoLonSteps];
-    bool ringHit[kGizmoLatSteps][kGizmoLonSteps] = {};
-
-    for (int lat = 1; lat < kGizmoLatSteps; lat++) {
-        float theta = PI * float(lat) / kGizmoLatSteps;
-        for (int lon = 0; lon < kGizmoLonSteps; lon++) {
-            float phi = 2.0f * PI * float(lon) / kGizmoLonSteps;
-            Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
-            ringHit[lat][lon] = RaymarchToSurface(field, center, dir, startRadius, ringPoints[lat][lon]);
-        }
-    }
-
-    Vector3 northPoint{}, southPoint{};
-    bool gotNorth = RaymarchToSurface(field, center, Vector3{ 0, 1, 0 }, startRadius, northPoint);
-    bool gotSouth = RaymarchToSurface(field, center, Vector3{ 0, -1, 0 }, startRadius, southPoint);
-
-    // Rings: connect consecutive longitudes within a latitude row (closed loop).
-    for (int lat = 1; lat < kGizmoLatSteps; lat++) {
-        for (int lon = 0; lon < kGizmoLonSteps; lon++) {
-            int next = (lon + 1) % kGizmoLonSteps;
-            if (ringHit[lat][lon] && ringHit[lat][next]) {
-                DrawLine3D(ringPoints[lat][lon], ringPoints[lat][next], color);
-            }
-        }
-    }
-    // Meridians: pole -> first ring -> ... -> last ring -> pole.
-    for (int lon = 0; lon < kGizmoLonSteps; lon++) {
-        if (gotNorth && ringHit[1][lon]) DrawLine3D(northPoint, ringPoints[1][lon], color);
-        for (int lat = 1; lat < kGizmoLatSteps - 1; lat++) {
-            if (ringHit[lat][lon] && ringHit[lat + 1][lon]) {
-                DrawLine3D(ringPoints[lat][lon], ringPoints[lat + 1][lon], color);
-            }
-        }
-        if (gotSouth && ringHit[kGizmoLatSteps - 1][lon]) {
-            DrawLine3D(ringPoints[kGizmoLatSteps - 1][lon], southPoint, color);
-        }
-    }
-}
 } // namespace
 
 void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
@@ -293,7 +216,9 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
         const int resolution = shapeField_->Resolution();
 
         if (ctx.debug->showShapeBounds) {
-            DrawFieldWireframe(*shapeField_, Fade(SKYBLUE, 0.5f));
+            // Drawn by the shape provider itself, not reconstructed here --
+            // see IShapeProvider::DrawDebugWireframe's comment.
+            shapeProvider_->DrawDebugWireframe(*shapeField_, Fade(SKYBLUE, 0.5f));
             // Bake-grid extent (the actual sampled volume), distinct from
             // the shape wireframe above -- lets grid resolution/extent be
             // visually cross-checked against where the shape sits inside it.

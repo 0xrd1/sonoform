@@ -122,6 +122,11 @@ private:
 
     float beatFlash_ = 0.0f;
     float lightningCooldown_ = 0.0f;
+    // Mirrors lightningCooldown_'s pattern for fog_'s audio-driven kick
+    // impulse (see FogAudioSettings::kickBeatThreshold/kickCooldownSeconds)
+    // -- the trigger/cooldown decision lives here (alongside the identical
+    // lightning one), fog_.KickImpulse() only does the actual force call.
+    float kickCooldown_ = 0.0f;
 
     // Cached from FrameContext::time each Update(), for Draw() (const, no
     // FrameContext of its own) to feed particle_render.frag's sprite-noise

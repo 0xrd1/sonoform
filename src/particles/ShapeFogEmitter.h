@@ -7,6 +7,7 @@
 class ShaderLibrary;
 class ParticleRenderer;
 class ShapeField;
+class AudioAnalyzer;
 namespace ui { class IParamVisitor; }
 
 // The generic, reusable half of what NeonFogVisualizer used to do
@@ -38,9 +39,13 @@ public:
     // ShapeField (see ShapeField::SetCenter/SetHalfExtent). `morphStrength`
     // is the eased shape-attraction driver (owned by the caller). `shadeLightDir`/
     // `shadeAmbientFloor` feed SetShading every frame, so Lighting panel
-    // edits apply live.
+    // edits apply live. `audioAnalyzer` feeds the `audio` settings below
+    // (Turbulence x Excitement/Treble -- see FogAudioSettings) when
+    // `audio.reactive`; reads harmless zero-initialized defaults when no
+    // track is loaded/playing, same as every other audio.* consumer in
+    // this project, so this is always safe to call.
     void Update(float dt, float time, const ShapeField& field, float morphStrength,
-                Vector3 shadeLightDir, float shadeAmbientFloor);
+                Vector3 shadeLightDir, float shadeAmbientFloor, const AudioAnalyzer& audioAnalyzer);
 
     // fadeMode is fixed at 2 (two-sided edge fade -- see
     // particle_render.vert's FadeCurve) and sizeScale at 1.0: neither has
@@ -51,16 +56,29 @@ public:
 
     int AliveCountApprox() const { return system_ ? system_->AliveCountApprox() : 0; }
 
-    // Wraps emission/force/attraction's own Visit() in named sub-groups --
-    // see EngineSettings.h's FogEmissionSettings/FogForceSettings/
-    // FogAttractionSettings. Caller wraps this in its own outer
-    // BeginGroup/EndGroup (e.g. per-emitter name), same pattern as
-    // NeonFogVisualizer::VisitSettings already uses for Lighting/Lightning/Floor.
+    // One-shot outward velocity kick (see GpuParticleSystem::
+    // ApplyRadialImpulse) -- forwarded so callers never need to reach
+    // through to the owned GpuParticleSystem directly. Called by
+    // NeonFogVisualizer::Update() on a hard beat (see FogAudioSettings::
+    // kickBeatThreshold/kickCooldownSeconds) -- the beat-detection/
+    // cooldown logic itself lives there, mirroring the existing lightning-
+    // trigger pattern, not duplicated here.
+    void KickImpulse(Vector3 center, float strength, float maxRadius) {
+        if (system_) system_->ApplyRadialImpulse(center, strength, maxRadius);
+    }
+
+    // Wraps emission/force/attraction/audio's own Visit() in named
+    // sub-groups -- see EngineSettings.h's FogEmissionSettings/
+    // FogForceSettings/FogAttractionSettings/FogAudioSettings. Caller
+    // wraps this in its own outer BeginGroup/EndGroup (e.g. per-emitter
+    // name), same pattern as NeonFogVisualizer::VisitSettings already
+    // uses for Lighting/Lightning/Floor.
     void VisitSettings(ui::IParamVisitor& v);
 
     ui::FogEmissionSettings emission;
     ui::FogForceSettings force;
     ui::FogAttractionSettings attraction;
+    ui::FogAudioSettings audio;
 
 private:
     std::unique_ptr<GpuParticleSystem> system_;
@@ -71,4 +89,9 @@ private:
     int shapeConformForceIndex_ = -1;
 
     float spawnAccumulator_ = 0.0f;
+
+    // Smoothed audio-energy envelope driving Turbulence x Excitement (see
+    // FogAudioSettings) -- eased rather than read raw so slower knobs
+    // don't jitter frame-to-frame with every FFT update.
+    float excitement_ = 0.0f;
 };

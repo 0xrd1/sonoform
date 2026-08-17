@@ -1,16 +1,21 @@
 #pragma once
 #include <array>
 #include <vector>
-#include <deque>
 #include <mutex>
+#include <chrono>
 #include "raylib.h"
 
 // Captures live samples from a playing Music stream via raylib's audio
-// stream processor callback (runs on raylib's audio thread), then on the
-// main thread performs windowing + FFT to produce a magnitude spectrum,
-// coarse frequency bands (bass/mid/treble), and simple energy-based beat
-// detection. All public getters are safe to call from the main thread
-// after Update().
+// stream processor callback (runs on raylib's own audio-mixing thread),
+// then performs windowing + FFT to produce a magnitude spectrum, coarse
+// frequency bands (bass/mid/treble), and simple energy-based beat
+// detection. Update() runs on a dedicated audio-update thread (see
+// App's AudioThread) rather than inline in the main render loop -- so it
+// keeps advancing (music keeps reacting) even while the main thread is
+// blocked inside an interactive window resize/move, which on Windows
+// blocks the OS message pump for the whole drag. Every public getter is
+// therefore a genuine cross-thread read and is safe to call from any
+// thread at any time -- see snapshot_/snapshotMutex_.
 class AudioAnalyzer {
 public:
     static constexpr int kFFTSize = 1024;               // power of two
@@ -26,19 +31,29 @@ public:
     void AttachTo(Music& music);
     void Detach();
 
-    // Call once per frame (main thread) after UpdateMusicStream().
+    // Call regularly (any single thread -- see the class comment; today
+    // that's App's dedicated audio-update thread, not the main loop).
     void Update();
 
+    // Spectrum/Bars are read today only from the same thread that calls
+    // Update() (the Spectrum Ring visualizer, currently disabled --
+    // see App.cpp's kAudioEnabled-era comment); unlike the scalar
+    // getters below they are not snapshot-published, so treat them as
+    // same-thread-as-Update() only unless/until something cross-thread
+    // needs them too.
     const std::array<float, kSpectrumBins>& Spectrum() const { return smoothedSpectrum_; }
     const std::array<float, kNumBars>& Bars() const { return bars_; }
 
-    float Bass() const { return bass_; }
-    float Mid() const { return mid_; }
-    float Treble() const { return treble_; }
-    float Energy() const { return energy_; }
-
-    bool BeatTriggered() const { return beatTriggered_; }
-    float BeatIntensity() const { return beatIntensity_; }
+    // Cross-thread-safe: each call takes a brief lock on the latest
+    // published AudioSnapshot (see Update()'s comment). Called every
+    // frame from the main thread while Update() runs on the audio
+    // thread, so this must never be a plain unsynchronized field read.
+    float Bass() const;
+    float Mid() const;
+    float Treble() const;
+    float Energy() const;
+    bool BeatTriggered() const;
+    float BeatIntensity() const;
 
 private:
     static void AudioCallback(void* buffer, unsigned int frames);
@@ -46,9 +61,12 @@ private:
 
     static AudioAnalyzer* sActive;
 
-    // Ring buffer of mono samples, filled on the audio thread, drained
-    // on the main thread. Protected by mutex_ since raylib's audio
-    // callback runs on a separate thread.
+    // Ring buffer of mono samples, filled on raylib's own audio-mixing
+    // thread (the AttachAudioStreamProcessor callback), drained by
+    // whichever thread calls Update() (see the class comment). Protected
+    // by mutex_ -- distinct from snapshotMutex_ below so publishing a
+    // finished snapshot never contends with the audio-mixing thread's
+    // per-buffer sample writes.
     std::mutex mutex_;
     std::vector<float> ring_;
     size_t ringCapacity_ = 0;
@@ -60,12 +78,32 @@ private:
     std::array<float, kSpectrumBins> smoothedSpectrum_{};
     std::array<float, kNumBars> bars_{};
 
-    float bass_ = 0.0f, mid_ = 0.0f, treble_ = 0.0f, energy_ = 0.0f;
+    // The whole set of derived scalars, published as one unit at the end
+    // of each Update() so a reader on another thread never sees a torn
+    // combination (e.g. bass_ from one update tick paired with
+    // beatTriggered_ from the next) -- plain per-field floats/bools, as
+    // this used to be, are a real data race once Update() no longer runs
+    // on the same thread as the getters' callers.
+    struct AudioSnapshot {
+        float bass = 0.0f, mid = 0.0f, treble = 0.0f, energy = 0.0f;
+        bool beatTriggered = false;
+        float beatIntensity = 0.0f;
+    };
+    mutable std::mutex snapshotMutex_;
+    AudioSnapshot snapshot_;
 
-    std::deque<float> energyHistory_;
-    bool beatTriggered_ = false;
-    float beatIntensity_ = 0.0f;
+    // Rolling bass average the beat detector compares against, and how
+    // long Update() has been running -- both time-based (a first-order
+    // lag / elapsed-seconds gate) rather than a fixed sample count, so
+    // behavior doesn't change if Update()'s calling cadence ever changes
+    // (it moved from "once per render frame" to a dedicated ~120Hz audio
+    // thread -- see the class comment -- without this these would have
+    // silently retuned the beat detector's sensitivity).
+    float avgBassEnergy_ = 0.0f;
+    float warmupElapsed_ = 0.0f;
     float beatCooldown_ = 0.0f;
+    std::chrono::steady_clock::time_point lastUpdateTime_{};
+    bool hasLastUpdateTime_ = false;
 
     Music* attached_ = nullptr;
 };

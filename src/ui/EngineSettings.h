@@ -193,6 +193,55 @@ struct FogAttractionSettings {
 };
 
 // -----------------------------------------------------------------------
+// Neon Fog: how this emitter's forces respond to music -- "destructive
+// but resisted": turbulence and one-shot kick impulses are audio-driven,
+// but nothing here ever touches Shape Attraction/Shape Curl/Morph Force
+// (FogForceSettings/ShapeSettings), so the silhouette always holds
+// against whatever the music throws at it, structurally rather than by
+// convention. Independent of ui::AudioSettings::enabled (which gates
+// whether audio exists at all this session) -- `reactive` lets this
+// emitter's own response be muted separately, e.g. for a future second
+// emitter that shouldn't react the same way.
+// -----------------------------------------------------------------------
+struct FogAudioSettings {
+    bool reactive = true;
+
+    // Added on top of Turbulence Strength (FogForceSettings) each frame --
+    // the base slider stays the resting/ambient value, audio adds to it,
+    // same pattern FogLightingSettings' hue/intensity fields already use.
+    float turbulenceEnergyScale = 1.5f;  // scaled by the smoothed Excitement envelope (slow, avoids jitter)
+    float turbulenceTrebleScale = 0.8f;  // scaled by instantaneous Treble -- the "fizzy" high-end response
+    float excitementSmoothing = 1.2f;    // seconds; low-pass time constant for the Energy -> Excitement envelope
+
+    // A hard beat gives the fog a one-shot outward kick (GpuParticleSystem::
+    // ApplyRadialImpulse) -- particles genuinely get knocked loose; recruited
+    // ones wobble and get pulled back by Shape Attraction, shed ones just
+    // fly off and despawn on schedule. Separate threshold from
+    // LightningSettings' own -- kicks and bolts don't have to agree on what
+    // counts as "hard."
+    float kickBeatThreshold = 0.5f;
+    float kickImpulseStrength = 2.5f;
+    float kickImpulseRadius = 3.0f;
+    float kickCooldownSeconds = 0.12f;
+
+    void Visit(IParamVisitor& v) {
+        FogAudioSettings d;
+        v.Bool(reactive, d.reactive, { "Reactive", "Whether this emitter's forces respond to music at all. Independent of the master Audio Enabled toggle." });
+        v.Float(turbulenceEnergyScale, d.turbulenceEnergyScale, 0.0f, 6.0f,
+            { "Turbulence x Excitement", "Turbulence Strength added per unit of the smoothed Excitement envelope (overall loudness/energy, slow-moving)." });
+        v.Float(turbulenceTrebleScale, d.turbulenceTrebleScale, 0.0f, 6.0f,
+            { "Turbulence x Treble", "Turbulence Strength added per unit of instantaneous Treble -- a faster, fizzier response than Excitement." });
+        v.Float(excitementSmoothing, d.excitementSmoothing, 0.1f, 5.0f,
+            { "Excitement Smoothing", "Seconds; how slowly the Excitement envelope follows raw audio Energy. Higher = calmer, slower-building reactivity." });
+        v.Float(kickBeatThreshold, d.kickBeatThreshold, 0.0f, 1.0f,
+            { "Kick Beat Threshold", "Minimum beat intensity that fires an outward kick impulse." });
+        v.Float(kickImpulseStrength, d.kickImpulseStrength, 0.0f, 15.0f, { "Kick Impulse Strength", "Outward velocity kick applied to particles near the field center on a hard beat." });
+        v.Float(kickImpulseRadius, d.kickImpulseRadius, 0.5f, 15.0f, { "Kick Impulse Radius", "Radius around the field center the kick impulse affects." });
+        v.Float(kickCooldownSeconds, d.kickCooldownSeconds, 0.0f, 2.0f, { "Kick Cooldown", "Minimum seconds between kick impulses, so a burst of rapid beats can't stack them." });
+    }
+};
+
+// -----------------------------------------------------------------------
 // Neon Fog: the core light -- the fog's only real light source (see
 // NeonFogVisualizer's class comment on why color/intensity carry all of the
 // fog's apparent color) -- plus the fake self-shadow shading angle.
@@ -365,6 +414,28 @@ struct PerformanceSettings {
         v.Bool(vsync, d.vsync, { "VSync", "Synchronize frame presentation to the display's refresh rate." });
         v.Int(targetFps, d.targetFps, 0, 500,
             { "Target FPS", "0 = uncapped. Useful with VSync off, to see how much particle-count headroom the GPU actually has before it starts to slow down." });
+    }
+};
+
+// -----------------------------------------------------------------------
+// Whether audio exists at all this session, and at what volume --
+// deliberately *not* part of VisitAll's preset round-trip (see
+// PerformanceSettings' own comment just above for the identical
+// reasoning): whether audio is on, and which track/volume, are session
+// state, not "the look" -- loading a preset shouldn't hijack playback.
+// App applies `enabled` transitions lazily (audio device / track list
+// only initialize the first time it flips true -- see App::ApplyAudioSettings)
+// and `volume` only when it actually changes, same edge-triggered-apply
+// pattern ApplyPerformanceSettings already uses for vsync/fps.
+// -----------------------------------------------------------------------
+struct AudioSettings {
+    bool enabled = false;
+    float volume = 0.6f;
+
+    void Visit(IParamVisitor& v) {
+        AudioSettings d;
+        v.Bool(enabled, d.enabled, { "Enabled", "Turns on the audio device, track playback, and every audio-reactive visual (lighting, turbulence, kick impulses). Off by default -- silent, no audio device initialized, exactly like a build with no audio support at all." });
+        v.Float(volume, d.volume, 0.0f, 1.0f, { "Volume", "Music playback volume." });
     }
 };
 

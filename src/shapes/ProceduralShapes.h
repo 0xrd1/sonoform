@@ -32,6 +32,7 @@ public:
     ProceduralShapeType Type() const { return type_; }
 
     void BakeInto(ShapeField& field, float time) override;
+    void DrawDebugWireframe(const ShapeField& field, Color color) const override;
 
 private:
     ProceduralShapeType type_;

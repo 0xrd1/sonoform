@@ -2,6 +2,8 @@
 #include "ForceFactory.h"
 #include "ShapeField.h"
 #include "ParamVisitor.h"
+#include "AudioAnalyzer.h"
+#include <algorithm>
 
 void ShapeFogEmitter::Init(ShaderLibrary& shaders, ParticleRenderer& renderer, ShapeField& field) {
     // Re-entrant -- see the header's comment. Every value read below comes
@@ -22,16 +24,35 @@ void ShapeFogEmitter::Init(ShaderLibrary& shaders, ParticleRenderer& renderer, S
 }
 
 void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, float morphStrength,
-                              Vector3 shadeLightDir, float shadeAmbientFloor) {
+                              Vector3 shadeLightDir, float shadeAmbientFloor, const AudioAnalyzer& audioAnalyzer) {
     if (!system_) return;
 
     // Forces are re-pushed every frame so panel edits apply live -- see
-    // ui::FogForceSettings/FogAttractionSettings.
+    // ui::FogForceSettings/FogAttractionSettings. Note what audio never
+    // touches: shapeAttraction/shapeCurl/morphStrength here are exactly
+    // the panel/driver values, un-modulated -- see FogAudioSettings'
+    // comment on why the shape-holding forces are structurally exempt
+    // from audio reactivity ("destructive but resisted").
     system_->SetForce(shapeConformForceIndex_,
         gpu_force::ShapeConform(force.shapeAttraction, force.shapeCurl, morphStrength, attraction.recruitFraction,
                                  attraction.volumeDepth, force.flowNoiseScale));
     system_->SetForce(gravityForceIndex_, gpu_force::GravityWell(field.Center(), force.gravityStrength, force.gravitySoftening));
-    system_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(force.turbulenceStrength, force.turbulenceScale));
+
+    // Turbulence is the one force audio is allowed to add to: the base
+    // slider stays the resting/ambient value, audio adds on top for this
+    // frame only (never written back into force.turbulenceStrength
+    // itself) -- same "base + audio scale" pattern FogLightingSettings'
+    // hue/intensity fields already use. Excitement is a slow envelope
+    // (eased toward Energy() at a tunable rate) so the ambient turbulence
+    // floor breathes with the track instead of jittering every FFT
+    // update; Treble is read raw for a faster, fizzier top-end response.
+    float effectiveTurbulence = force.turbulenceStrength;
+    if (audio.reactive) {
+        float smoothing = std::max(audio.excitementSmoothing, 0.01f);
+        excitement_ += (audioAnalyzer.Energy() - excitement_) * std::min(1.0f, dt / smoothing);
+        effectiveTurbulence += excitement_ * audio.turbulenceEnergyScale + audioAnalyzer.Treble() * audio.turbulenceTrebleScale;
+    }
+    system_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(effectiveTurbulence, force.turbulenceScale));
     system_->SetForce(dragForceIndex_, gpu_force::Drag(force.dragCoefficient));
 
     // Cheap CPU-side (two field writes -- see GpuParticleSystem::SetShading),
@@ -112,5 +133,9 @@ void ShapeFogEmitter::VisitSettings(ui::IParamVisitor& v) {
 
     v.BeginGroup("Attraction");
     attraction.Visit(v);
+    v.EndGroup();
+
+    v.BeginGroup("Audio");
+    audio.Visit(v);
     v.EndGroup();
 }

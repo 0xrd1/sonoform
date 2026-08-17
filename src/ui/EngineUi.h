@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <vector>
+#include <functional>
 #include "raylib.h"
 
 // Facade over Dear ImGui + rlImGui. Exposes no ImGui type in its own
@@ -18,6 +20,7 @@ struct CameraSettings;
 struct PostSettings;
 struct PerformanceSettings;
 struct DebugSettings;
+struct AudioSettings;
 
 // Everything the debug panel needs, as raw pointers into App's own fields
 // rather than a copy-in/copy-back struct -- so a slider takes effect the
@@ -25,6 +28,13 @@ struct DebugSettings;
 // are only used for the "Rebuild Systems" action (re-runs the current
 // visualizer's Init(), which is what actually applies any NeedsRebuild
 // field -- see ParamFlags::NeedsRebuild).
+//
+// Every side effect that touches a raylib Music object (pause/resume,
+// next/prev/select-track) is a callback into App rather than a raw
+// `Music*` this file pokes directly -- App's audio thread (see
+// AudioThread.h) means every Music touch now needs to go through a
+// mutex, and that synchronization concern has no business leaking into
+// this UI-drawing code.
 struct PanelState {
     VisualizerManager* visualizers = nullptr;
     ShaderLibrary* shaders = nullptr;
@@ -34,11 +44,24 @@ struct PanelState {
     PostSettings* post = nullptr;
     PerformanceSettings* performance = nullptr; // not part of the preset round-trip -- see its own comment
     DebugSettings* debug = nullptr;             // drawn in its own stacked window -- see DrawDebugWindow
+    AudioSettings* audio = nullptr;             // not part of the preset round-trip either -- see its own comment
 
     bool* showHud = nullptr;
     bool* paused = nullptr;
-    Music* music = nullptr;       // for pause's PauseMusicStream/ResumeMusicStream side effect
+    // Invoked whenever the Paused checkbox's value actually changes (not
+    // every frame) -- App wires this to its own mutex-guarded Pause/
+    // ResumeMusicStream side effect.
+    std::function<void(bool)> onPausedChanged;
     bool musicLoaded = false;
+
+    // The playlist as display names (see App::TrackDisplayName), and
+    // which entry is current -- App::TrackCount()/trackPaths_ own the
+    // real data, this is just what the transport UI needs to draw itself.
+    const std::vector<std::string>* trackNames = nullptr;
+    int currentTrackIndex = -1;
+    std::function<void()> onNextTrack;
+    std::function<void()> onPrevTrack;
+    std::function<void(int)> onSelectTrack;
 
     int particleCount = 0;
     const char* trackLabel = "";

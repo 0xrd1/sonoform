@@ -109,14 +109,60 @@ void DrawDebugPanel(PanelState& state) {
     if (state.paused != nullptr) {
         bool wasPaused = *state.paused;
         ImGui::Checkbox("Paused", state.paused);
-        if (*state.paused != wasPaused && state.music != nullptr && state.musicLoaded) {
-            if (*state.paused) PauseMusicStream(*state.music);
-            else ResumeMusicStream(*state.music);
+        if (*state.paused != wasPaused && state.onPausedChanged) {
+            state.onPausedChanged(*state.paused);
         }
     }
     if (state.showHud != nullptr) {
         ImGui::SameLine();
         ImGui::Checkbox("Text HUD", state.showHud);
+    }
+
+    if (state.audio != nullptr) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Audio");
+        ImGui::Checkbox("Enabled", &state.audio->enabled);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Turns on the audio device, track playback, and every audio-reactive visual "
+                "(lighting, turbulence, kick impulses). Off by default -- silent, no audio "
+                "device initialized.");
+        }
+        ImGui::SliderFloat("Volume", &state.audio->volume, 0.0f, 1.0f);
+
+        bool canTransport = state.audio->enabled && state.musicLoaded;
+        ImGui::BeginDisabled(!canTransport);
+        if (ImGui::Button("<< Prev") && state.onPrevTrack) state.onPrevTrack();
+        ImGui::SameLine();
+        bool isPaused = state.paused != nullptr && *state.paused;
+        if (ImGui::Button(isPaused ? "Play" : "Pause") && state.paused != nullptr) {
+            *state.paused = !*state.paused;
+            if (state.onPausedChanged) state.onPausedChanged(*state.paused);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Next >>") && state.onNextTrack) state.onNextTrack();
+        ImGui::EndDisabled();
+
+        // A compact scrollable playlist -- same bullet + SmallButton shape
+        // as the Presets list further down, just swapped to track names
+        // and state.onSelectTrack.
+        if (state.trackNames != nullptr && !state.trackNames->empty()) {
+            ImGui::BeginChild("TrackList", ImVec2(0.0f, 90.0f), true);
+            for (int i = 0; i < static_cast<int>(state.trackNames->size()); i++) {
+                ImGui::PushID(i);
+                const std::string& name = (*state.trackNames)[static_cast<size_t>(i)];
+                if (i == state.currentTrackIndex) ImGui::BulletText("%s (playing)", name.c_str());
+                else ImGui::BulletText("%s", name.c_str());
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!state.audio->enabled);
+                if (ImGui::SmallButton("Play") && state.onSelectTrack) state.onSelectTrack(i);
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
     }
 
     ImGui::Separator();

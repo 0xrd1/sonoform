@@ -15,26 +15,21 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
 namespace {
+// Every format raylib 5.5's LoadMusicStream can actually stream (miniaudio/
+// stb_vorbis/dr_mp3/dr_flac for wav/ogg/mp3/flac, jar_xm/jar_mod for
+// xm/mod, plus raylib's own qoa) -- not an arbitrary subset, so anything
+// droppable into assets/audio that raylib can play gets picked up.
 bool HasSupportedAudioExt(const fs::path& p) {
     std::string ext = p.extension().string();
     for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".flac";
+    return ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".flac" ||
+           ext == ".xm" || ext == ".mod" || ext == ".qoa";
 }
-
-// Temporarily off: work is focused entirely on the Neon Fog particle/
-// shape-morph pipeline (performance + legibility) for now, and audio
-// playback was producing pops/clicks that were a distraction during that
-// work, independent of whatever is causing them. Flip back on (and
-// restore the other Add() calls below) once that's done. With this off,
-// App::musicLoaded_ stays false, so Run() never calls UpdateMusicStream/
-// AudioAnalyzer::Update -- NeonFogVisualizer's audio.* calls all read
-// harmless zero-initialized defaults (see AudioAnalyzer.h), so lighting
-// just stays at its resting color/intensity instead of erroring.
-constexpr bool kAudioEnabled = false;
 }
 
 bool App::Init(const std::string& audioPathArg) {
@@ -70,7 +65,11 @@ bool App::Init(const std::string& audioPathArg) {
         return false;
     }
 
-    if (kAudioEnabled) InitAudioDevice();
+    // Audio device/track loading is deferred entirely to ApplyAudioSettings,
+    // the first time ui::AudioSettings::enabled actually flips true (see
+    // its own comment) -- a cold launch with audio off (the default) stays
+    // exactly as fast/silent as a build with no audio support at all.
+    audioPathArg_ = audioPathArg;
 
     // ParticleRenderer's constructor issues real GL calls (compiles the
     // render shader, allocates a VAO), so it can only be constructed here,
@@ -86,10 +85,10 @@ bool App::Init(const std::string& audioPathArg) {
     accentTexture_ = LoadTextureFromImage(glow);
     UnloadImage(glow);
 
-    if (kAudioEnabled) LoadAudio(audioPathArg);
-
     // Only Neon Fog while its particle/shape-morph pipeline is the sole
-    // focus -- see kAudioEnabled. Restore these once that work lands.
+    // visual focus -- audio is back (see ApplyAudioSettings), but the
+    // other four visualizers stay disabled for now. Restore these Add()
+    // calls once that work lands.
     visualizers_.Add(std::make_unique<NeonFogVisualizer>(), shaderLibrary_, *particleRenderer_);
     // visualizers_.Add(std::make_unique<SpectrumRingVisualizer>(), shaderLibrary_, *particleRenderer_);
     // visualizers_.Add(std::make_unique<GalaxyVisualizer>(), shaderLibrary_, *particleRenderer_);
@@ -138,46 +137,138 @@ bool App::Init(const std::string& audioPathArg) {
     return true;
 }
 
-bool App::LoadAudio(const std::string& audioPathArg) {
-    std::string pathToLoad;
+void App::ScanTrackList() {
+    trackPaths_.clear();
 
-    if (!audioPathArg.empty() && FileExists(audioPathArg.c_str())) {
-        pathToLoad = audioPathArg;
+    // A command-line-specified file overrides the directory scan entirely
+    // -- a single-entry "playlist" of just that file, same as the old
+    // LoadAudio's precedence.
+    if (!audioPathArg_.empty() && FileExists(audioPathArg_.c_str())) {
+        trackPaths_.push_back(audioPathArg_);
     } else {
         fs::path audioDir = fs::path("assets") / "audio";
         if (fs::exists(audioDir) && fs::is_directory(audioDir)) {
             for (const auto& entry : fs::directory_iterator(audioDir)) {
                 if (entry.is_regular_file() && HasSupportedAudioExt(entry.path())) {
-                    pathToLoad = entry.path().string();
-                    break;
+                    trackPaths_.push_back(entry.path().string());
                 }
             }
         }
+        std::sort(trackPaths_.begin(), trackPaths_.end(), [](const std::string& a, const std::string& b) {
+            return fs::path(a).filename().string() < fs::path(b).filename().string();
+        });
+        // Empty is a valid outcome (nothing dropped into assets/audio yet)
+        // -- TrackCount()/PlayTrack both fall back to the procedural demo
+        // track as a one-entry playlist in that case, not an error.
     }
 
-    if (!pathToLoad.empty()) {
-        music_ = LoadMusicStream(pathToLoad.c_str());
-        trackLabel_ = fs::path(pathToLoad).filename().string();
-        usingProceduralTrack_ = false;
+    trackDisplayNames_.clear();
+    if (trackPaths_.empty()) {
+        trackDisplayNames_.push_back("Procedural Demo Track");
     } else {
+        for (const auto& path : trackPaths_) trackDisplayNames_.push_back(fs::path(path).filename().string());
+    }
+}
+
+std::string App::TrackDisplayName(int index) const {
+    if (index < 0 || index >= static_cast<int>(trackDisplayNames_.size())) return "?";
+    return trackDisplayNames_[static_cast<size_t>(index)];
+}
+
+void App::PlayTrack(int index) {
+    int count = TrackCount();
+    if (count <= 0) return; // unreachable -- TrackCount() is always >= 1 -- but no reason to trust that blindly here
+    index = ((index % count) + count) % count;
+    currentTrackIndex_ = index;
+
+    // Every touch of music_ below -- detach, unload, load, attach, play --
+    // happens under the same lock the audio thread takes for its periodic
+    // UpdateMusicStream (see AudioThread's class comment). Held for this
+    // whole sequence (including file I/O) rather than per-call: the
+    // audio thread must never see music_ mid-swap.
+    std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+
+    // Detach while the OLD stream (if any) is still valid, *before*
+    // unloading it -- AttachTo() below would otherwise run its own
+    // internal Detach() against whatever music_.stream holds *after*
+    // reassignment (the new stream, never actually attached), not the one
+    // that really was.
+    analyzer_.Detach();
+    if (musicLoaded_) {
+        StopMusicStream(music_);
+        UnloadMusicStream(music_);
+        musicLoaded_ = false;
+    }
+
+    if (trackPaths_.empty()) {
         proceduralTrackData_ = GenerateDemoTrackWav(90.0f, 44100);
         music_ = LoadMusicStreamFromMemory(".wav", proceduralTrackData_.data(),
                                             static_cast<int>(proceduralTrackData_.size()));
-        trackLabel_ = "Procedural Demo Track (drop an mp3/wav/ogg into assets/audio to use your own)";
+        trackLabel_ = "Procedural Demo Track (drop mp3/wav/ogg/flac/xm/mod/qoa into assets/audio to use your own)";
         usingProceduralTrack_ = true;
+    } else {
+        const std::string& path = trackPaths_[static_cast<size_t>(index)];
+        music_ = LoadMusicStream(path.c_str());
+        trackLabel_ = fs::path(path).filename().string();
+        usingProceduralTrack_ = false;
     }
 
     if (!IsMusicValid(music_)) {
         musicLoaded_ = false;
-        return false;
+        return;
     }
 
-    music_.looping = true;
-    SetMusicVolume(music_, 0.6f);
+    // The procedural fallback loops seamlessly in place (there's nothing
+    // else to advance to); a real playlist instead lets Run()'s
+    // end-of-track check advance to the next entry (see the auto-advance
+    // block there), which needs looping off to ever actually fire.
+    music_.looping = usingProceduralTrack_;
+    SetMusicVolume(music_, audioSettings_.volume);
     PlayMusicStream(music_);
     analyzer_.AttachTo(music_);
     musicLoaded_ = true;
-    return true;
+}
+
+void App::NextTrack() { PlayTrack(currentTrackIndex_ + 1); }
+void App::PrevTrack() { PlayTrack(currentTrackIndex_ - 1); }
+
+void App::ApplyAudioSettings() {
+    if (audioSettings_.enabled != lastAudioEnabled_) {
+        if (audioSettings_.enabled) {
+            if (!audioDeviceInitialized_) {
+                InitAudioDevice();
+                audioDeviceInitialized_ = true;
+            }
+            if (!trackListScanned_) {
+                ScanTrackList();
+                trackListScanned_ = true;
+            }
+            if (!musicLoaded_) {
+                PlayTrack(currentTrackIndex_);
+                // Hand the now-valid, loaded stream to the audio thread so
+                // it keeps ticking (playback + analysis) through a window
+                // resize/move -- see AudioThread's class comment. Start()
+                // is a no-op on any call after the first, so this is safe
+                // to reach every time audio is (re-)enabled, not just once.
+                if (musicLoaded_) audioThread_.Start(music_, analyzer_);
+            } else if (!paused_) {
+                std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+                ResumeMusicStream(music_);
+            }
+        } else if (musicLoaded_) {
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            PauseMusicStream(music_);
+        }
+        lastAudioEnabled_ = audioSettings_.enabled;
+    }
+
+    if (audioSettings_.volume != lastAudioVolume_) {
+        if (musicLoaded_) {
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            SetMusicVolume(music_, audioSettings_.volume);
+        }
+        lastAudioVolume_ = audioSettings_.volume;
+    }
 }
 
 void App::ApplyPerformanceSettings() {
@@ -199,7 +290,41 @@ void App::Run() {
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
         ApplyPerformanceSettings();
-        if (musicLoaded_) UpdateMusicStream(music_);
+        ApplyAudioSettings();
+
+        // UpdateMusicStream/AudioAnalyzer::Update are no longer called
+        // here -- they run on audioThread_'s own dedicated cadence (see
+        // AudioThread's class comment) precisely so they keep going even
+        // while this loop is blocked inside an interactive window resize/
+        // move on Windows.
+
+        // A real (non-procedural) playlist advances on its own once the
+        // current track finishes -- see PlayTrack's looping comment for
+        // why the procedural fallback doesn't need this (it loops in
+        // place). Checked under the same lock as every other music_ touch.
+        if (audioSettings_.enabled && musicLoaded_ && !usingProceduralTrack_ && !paused_) {
+            bool trackEnded;
+            {
+                std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+                float played = GetMusicTimePlayed(music_);
+                float length = GetMusicTimeLength(music_);
+                // `played > 1.0f` guards against a real, observed false-
+                // positive right after a fresh PlayTrack(): immediately
+                // after LoadMusicStream/PlayMusicStream, before the audio
+                // thread's next UpdateMusicStream tick has run even once,
+                // GetMusicTimeLength/GetMusicTimePlayed can transiently
+                // report a length near 0 (decoder duration not fully
+                // settled yet) -- without this guard that reads as
+                // "already finished" and immediately advances again,
+                // which is exactly what was observed: tracks skipping
+                // every couple of seconds instead of playing to the end.
+                // A real track is always playing for well over a second
+                // before it can legitimately end, so this costs nothing
+                // for genuine end-of-track detection.
+                trackEnded = length > 0.5f && played > 1.0f && played >= length - 0.05f;
+            }
+            if (trackEnded) NextTrack();
+        }
 
         if (IsWindowResized()) {
             postProcess_->Resize(GetScreenWidth(), GetScreenHeight());
@@ -210,7 +335,6 @@ void App::Run() {
 
         if (!paused_) {
             elapsedTime_ += dt;
-            if (musicLoaded_) analyzer_.Update();
             FrameContext frame{ dt, elapsedTime_, analyzer_, postSettings_.reactivityIntensity };
             visualizers_.Update(frame);
         }
@@ -253,10 +377,13 @@ void App::HandleInput(float dt) {
     if (IsKeyDown(KEY_MINUS)) visualizers_.AdjustPrimaryOnCurrent(-dt * 0.6f);
     if (IsKeyDown(KEY_EQUAL)) visualizers_.AdjustPrimaryOnCurrent(dt * 0.6f);
 
-    if (IsKeyPressed(KEY_SPACE) && musicLoaded_) {
+    if (IsKeyPressed(KEY_SPACE)) {
         paused_ = !paused_;
-        if (paused_) PauseMusicStream(music_);
-        else ResumeMusicStream(music_);
+        if (musicLoaded_) {
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            if (paused_) PauseMusicStream(music_);
+            else ResumeMusicStream(music_);
+        }
     }
 
     if (IsKeyPressed(KEY_C)) cameraSettings_.autoRotate = !cameraSettings_.autoRotate;
@@ -405,8 +532,19 @@ void App::DrawUi() {
         state.debug = &debugSettings_;
         state.showHud = &showHud_;
         state.paused = &paused_;
-        state.music = &music_;
+        state.onPausedChanged = [this](bool paused) {
+            if (!musicLoaded_) return;
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            if (paused) PauseMusicStream(music_);
+            else ResumeMusicStream(music_);
+        };
         state.musicLoaded = musicLoaded_;
+        state.audio = &audioSettings_;
+        state.trackNames = &trackDisplayNames_;
+        state.currentTrackIndex = currentTrackIndex_;
+        state.onNextTrack = [this] { NextTrack(); };
+        state.onPrevTrack = [this] { PrevTrack(); };
+        state.onSelectTrack = [this](int index) { PlayTrack(index); };
         state.particleCount = hudParticleCount_;
         state.trackLabel = trackLabel_.c_str();
 
@@ -418,6 +556,11 @@ void App::DrawUi() {
 }
 
 void App::Shutdown() {
+    // Must stop (and join) before anything it touches is torn down --
+    // see AudioThread::Stop's doc comment. No lock needed here: once the
+    // thread is joined, nothing else touches music_/analyzer_ concurrently.
+    audioThread_.Stop();
+
     analyzer_.Detach();
     if (musicLoaded_) {
         StopMusicStream(music_);
@@ -442,6 +585,6 @@ void App::Shutdown() {
     shaderLibrary_.UnloadAll();
 
     UnloadTexture(accentTexture_);
-    CloseAudioDevice();
+    if (audioDeviceInitialized_) CloseAudioDevice();
     CloseWindow();
 }

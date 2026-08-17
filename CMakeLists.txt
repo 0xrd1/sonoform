@@ -29,6 +29,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(raylib)
 
+# raylib's own src/config.h leaves SUPPORT_FILEFORMAT_FLAC commented out by
+# default (unlike WAV/OGG/MP3/QOA/XM/MOD, which are all on) -- LoadMusicStream
+# on a .flac file silently produces an invalid Music (IsMusicValid() false)
+# without this, which is why FLAC tracks in assets/audio wouldn't play. A
+# PRIVATE compile definition on the already-fetched raylib target is the
+# surgical fix: it only affects raylib's own translation units (each one
+# `#include`s config.h unless EXTERNAL_CONFIG_FLAGS is defined -- see
+# raudio.c et al. -- and this doesn't set that, so every other default flag
+# in config.h still applies untouched). The alternative, raylib's own
+# CUSTOMIZE_BUILD option, defines EXTERNAL_CONFIG_FLAGS and makes every
+# raylib module skip config.h entirely, requiring every flag currently
+# relied on (not just audio) to be re-specified by hand -- a much larger
+# blast radius for what should be a one-line fix.
+target_compile_definitions(raylib PRIVATE SUPPORT_FILEFORMAT_FLAC)
+
 # ---------------------------------------------------------------------------
 # Dear ImGui + rlImGui -- the runtime parameter-editing UI (src/ui/).
 #

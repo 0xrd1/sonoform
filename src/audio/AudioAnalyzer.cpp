@@ -2,6 +2,7 @@
 #include "FFT.h"
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 // raylib's device mixing rate is fixed at 44100 Hz (see raylib config.h,
 // AUDIO_DEVICE_SAMPLE_RATE). Audio stream processors receive float32
@@ -61,6 +62,31 @@ void AudioAnalyzer::ProcessCallback(const float* buffer, unsigned int frames) {
         writePos_ = (writePos_ + 1) % ringCapacity_;
         totalWritten_++;
     }
+}
+
+float AudioAnalyzer::Bass() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.bass;
+}
+float AudioAnalyzer::Mid() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.mid;
+}
+float AudioAnalyzer::Treble() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.treble;
+}
+float AudioAnalyzer::Energy() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.energy;
+}
+bool AudioAnalyzer::BeatTriggered() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.beatTriggered;
+}
+float AudioAnalyzer::BeatIntensity() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.beatIntensity;
 }
 
 void AudioAnalyzer::Update() {
@@ -130,31 +156,58 @@ void AudioAnalyzer::Update() {
         return count > 0 ? sum / count : 0.0f;
     };
 
-    bass_ = bandAvg(20.0f, 250.0f);
-    mid_ = bandAvg(250.0f, 2000.0f);
-    treble_ = bandAvg(2000.0f, 10000.0f);
-    energy_ = (bass_ * 1.5f + mid_ + treble_ * 0.7f) / 3.0f;
+    float bass = bandAvg(20.0f, 250.0f);
+    float mid = bandAvg(250.0f, 2000.0f);
+    float treble = bandAvg(2000.0f, 10000.0f);
+    float energy = (bass * 1.5f + mid + treble * 0.7f) / 3.0f;
+
+    // Real elapsed time since the last Update() call -- not GetFrameTime()
+    // (that tracks the *main render loop's* last frame duration, which is
+    // meaningless here now that Update() runs on its own dedicated audio
+    // thread at its own cadence -- see the class comment). First call has
+    // no prior timestamp to diff against, so it contributes dt=0 (a no-op
+    // for the lag/decay below) rather than an undefined/huge value.
+    auto now = std::chrono::steady_clock::now();
+    float dt = 0.0f;
+    if (hasLastUpdateTime_) {
+        dt = std::chrono::duration<float>(now - lastUpdateTime_).count();
+    }
+    lastUpdateTime_ = now;
+    hasLastUpdateTime_ = true;
 
     // Simple energy-based beat detector: compare current bass energy
-    // against the recent rolling average. Fires when bass spikes well
-    // above the local average, with a cooldown to avoid double-fires.
-    energyHistory_.push_back(bass_);
-    constexpr size_t kHistoryLen = 45; // ~0.75s at 60Hz updates
-    while (energyHistory_.size() > kHistoryLen) energyHistory_.pop_front();
+    // against a rolling average. Fires when bass spikes well above that
+    // average, with a cooldown to avoid double-fires. avgBassEnergy_ is a
+    // time-based first-order lag (not a fixed-size sample window) so its
+    // effective ~0.75s time constant holds regardless of how often
+    // Update() is actually called.
+    constexpr float kAvgTimeConstant = 0.75f;
+    constexpr float kMinWarmupSeconds = 0.4f; // avoid false-positive beats before avgBassEnergy_ has settled
+    avgBassEnergy_ += (bass - avgBassEnergy_) * std::min(1.0f, dt / kAvgTimeConstant);
+    warmupElapsed_ += dt;
 
-    float avgEnergy = 0.0f;
-    for (float e : energyHistory_) avgEnergy += e;
-    avgEnergy /= static_cast<float>(energyHistory_.empty() ? 1 : energyHistory_.size());
+    beatCooldown_ = std::max(0.0f, beatCooldown_ - dt);
 
-    beatCooldown_ = std::max(0.0f, beatCooldown_ - GetFrameTime());
-
-    const float threshold = avgEnergy * 1.4f + 0.02f;
-    if (bass_ > threshold && beatCooldown_ <= 0.0f && energyHistory_.size() >= kHistoryLen / 2) {
-        beatTriggered_ = true;
-        float ratio = avgEnergy > 0.0001f ? (bass_ - avgEnergy) / avgEnergy : 1.0f;
-        beatIntensity_ = std::clamp(ratio, 0.0f, 3.0f) / 3.0f;
+    bool beatTriggered = false;
+    float beatIntensity = 0.0f;
+    const float threshold = avgBassEnergy_ * 1.4f + 0.02f;
+    if (bass > threshold && beatCooldown_ <= 0.0f && warmupElapsed_ >= kMinWarmupSeconds) {
+        beatTriggered = true;
+        float ratio = avgBassEnergy_ > 0.0001f ? (bass - avgBassEnergy_) / avgBassEnergy_ : 1.0f;
+        beatIntensity = std::clamp(ratio, 0.0f, 3.0f) / 3.0f;
         beatCooldown_ = 0.16f;
-    } else {
-        beatTriggered_ = false;
+    }
+
+    // Publish the whole derived-scalar set as one unit -- see
+    // AudioSnapshot's comment on why this must be atomic-as-a-group, not
+    // per-field.
+    {
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        snapshot_.bass = bass;
+        snapshot_.mid = mid;
+        snapshot_.treble = treble;
+        snapshot_.energy = energy;
+        snapshot_.beatTriggered = beatTriggered;
+        snapshot_.beatIntensity = beatIntensity;
     }
 }
