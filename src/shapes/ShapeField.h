@@ -36,6 +36,15 @@ public:
     Vector3 Center() const { return center_; }
     float HalfExtent() const { return halfExtent_; }
 
+    // Plain field writes -- neither touches the SSBO, only `resolution_`
+    // drives its allocation size (see the constructor). The caller is
+    // responsible for calling BakeProcedural (or BakeInto on a
+    // ShapeProvider) afterward so the baked field actually reflects the
+    // new transform; these two are cheap enough to apply live, every
+    // frame a setting changes, with no GPU reallocation.
+    void SetCenter(Vector3 center) { center_ = center; }
+    void SetHalfExtent(float halfExtent) { halfExtent_ = halfExtent; }
+
 private:
     ShaderLibrary& shaders_;
     GpuBuffer buffer_;

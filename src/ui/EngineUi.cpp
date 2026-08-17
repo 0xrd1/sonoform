@@ -200,6 +200,7 @@ void DrawDebugPanel(PanelState& state) {
 
 void DrawDebugWindow(PanelState& state) {
     if (state.debug == nullptr) return;
+    if (state.visualizers == nullptr) return;
 
     // Stacked below the settings window's estimated height -- see
     // kPanelHeightEstimate's comment: a default only, not enforced.
@@ -212,6 +213,16 @@ void DrawDebugWindow(PanelState& state) {
         return;
     }
     ImGui::PushItemWidth(kItemWidth);
+
+    // Precise numbers a 3D gizmo communicates poorly (grid resolution,
+    // voxel size, exact field center, current light color/intensity) --
+    // see Visualizer::DebugInfoText's comment. Optional: nullptr for a
+    // visualizer that hasn't implemented it.
+    const char* info = state.visualizers->CurrentDebugInfoText();
+    if (info != nullptr) {
+        ImGui::TextUnformatted(info);
+        ImGui::Separator();
+    }
 
     ImGui::TextDisabled("In-scene gizmos, drawn by the current visualizer");
     ImGuiPanelVisitor panel;

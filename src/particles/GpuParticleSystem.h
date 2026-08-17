@@ -129,11 +129,13 @@ public:
     // fadeMode: 0 = linear life fade, 1 = eased (min(1, ratio*1.5)),
     // 2 = two-sided edge fade -- see particle_render.vert's FadeCurve.
     // lights/lightCount let e.g. lightning bolts illuminate this system's
-    // particles from within; see gfx/LightSample.h.
+    // particles from within; see gfx/LightSample.h. spriteStyle: 0 = clean
+    // circular sprite, 1 (default) = noise-broken wispy look -- see
+    // particle_render.frag's uSpriteStyle and ui::DebugSettings::disableSpriteNoise.
     void Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode = 0, float sizeScale = 1.0f,
               const LightSample* lights = nullptr, int lightCount = 0,
-              float time = 0.0f) const;
+              float time = 0.0f, int spriteStyle = 1) const;
 
     int Capacity() const { return capacity_; }
 

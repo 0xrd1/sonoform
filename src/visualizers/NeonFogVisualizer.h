@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
 #include "Visualizer.h"
-#include "GpuParticleSystem.h"
+#include "ShapeFogEmitter.h"
 #include "ShapeField.h"
 #include "ProceduralShapes.h"
 #include "LightningSystem.h"
@@ -74,9 +74,10 @@ public:
     void Update(const FrameContext& frame) override;
     void Draw(const RenderContext& ctx) const override;
     const char* Name() const override { return "Neon Fog"; }
-    int ParticleCount() const override { return fog_ ? fog_->AliveCountApprox() : 0; }
+    int ParticleCount() const override { return fog_.AliveCountApprox(); }
 
     const char* ExtraStatusLine() const override;
+    const char* DebugInfoText() const override;
     void SecondaryAction() override { CycleShapePreset(); } // bound to a dedicated key in App
     void TertiaryAction() override { shapeSettings_.autoCycle = !shapeSettings_.autoCycle; } // bound to 'M' in App
     void AdjustPrimary(float delta) override; // bound to '-'/'=' in App: nudges shapeSettings_.morphForce
@@ -86,16 +87,22 @@ public:
 private:
     void CycleShapePreset();
 
-    std::unique_ptr<GpuParticleSystem> fog_;
+    // The shared target shape (ShapeField + the analytic provider that
+    // bakes into it) -- visualizer-level, since multiple emitters would
+    // all be attracted to the same one. fog_ is the one particle
+    // population attracted to it today; a second population is a second
+    // ShapeFogEmitter member plus three more call sites (Init/Update/Draw)
+    // and one more VisitSettings group -- see ShapeFogEmitter.h.
     std::unique_ptr<ShapeField> shapeField_;
     std::unique_ptr<ProceduralShapeProvider> shapeProvider_;
+    ShapeFogEmitter fog_;
     LightningSystem lightning_;
     VoidFloor floor_;
 
-    // All user-tunable state -- see src/ui/EngineSettings.h for field-level
-    // docs and tooltips (the same ParamMeta text shown in the panel).
-    ui::FogEmissionSettings emissionSettings_;
-    ui::FogForceSettings forceSettings_;
+    // All user-tunable state that's genuinely visualizer-level -- see
+    // src/ui/EngineSettings.h for field-level docs and tooltips (the same
+    // ParamMeta text shown in the panel). fog_'s own emission/force/
+    // attraction settings live on fog_ itself (see ShapeFogEmitter.h).
     ui::ShapeSettings shapeSettings_;
     ui::FogLightingSettings lightingSettings_;
     ui::LightningSettings lightningSettings_;
@@ -106,11 +113,6 @@ private:
     // tuning the user had already dialed in.
     bool settingsSeeded_ = false;
 
-    int gravityForceIndex_ = -1;
-    int turbulenceForceIndex_ = -1;
-    int dragForceIndex_ = -1;
-    int shapeConformForceIndex_ = -1;
-
     float morphStrength_ = 0.0f; // smoothed toward shapeSettings_.morphForce each frame
 
     // Auto-advances through shape presets on a fixed timer so the morph
@@ -118,7 +120,6 @@ private:
     // immediately, and 'M' (or the panel) toggles this on/off.
     float shapeTimer_ = 0.0f;
 
-    float spawnAccumulator_ = 0.0f;
     float beatFlash_ = 0.0f;
     float lightningCooldown_ = 0.0f;
 

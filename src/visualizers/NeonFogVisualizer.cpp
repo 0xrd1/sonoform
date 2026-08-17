@@ -1,5 +1,4 @@
 #include "NeonFogVisualizer.h"
-#include "ForceFactory.h"
 #include "raymath.h"
 #include <algorithm>
 #include <array>
@@ -10,27 +9,16 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
     // action, so every value read below comes from the *current* settings
     // members (which the user may already have tuned), never from a local
     // constant -- re-running Init() must apply live edits, not discard them.
-    fog_ = std::make_unique<GpuParticleSystem>(shaders, renderer, emissionSettings_.capacity);
-
     shapeField_ = std::make_unique<ShapeField>(shaders, shapeSettings_.gridResolution,
                                                 shapeSettings_.fieldCenter, shapeSettings_.gridHalfExtent);
     shapeProvider_ = std::make_unique<ProceduralShapeProvider>(static_cast<ProceduralShapeType>(shapeSettings_.shapeType));
     shapeProvider_->BakeInto(*shapeField_, 0.0f);
-    fog_->SetShapeField(shapeField_.get());
 
-    gravityForceIndex_ = fog_->AddForce(
-        gpu_force::GravityWell(shapeSettings_.fieldCenter, forceSettings_.gravityStrength, forceSettings_.gravitySoftening));
-    turbulenceForceIndex_ = fog_->AddForce(gpu_force::Turbulence(forceSettings_.turbulenceStrength, forceSettings_.turbulenceScale));
-    dragForceIndex_ = fog_->AddForce(gpu_force::Drag(forceSettings_.dragCoefficient));
-    shapeConformForceIndex_ = fog_->AddForce(
-        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, 0.0f, shapeSettings_.recruitFraction,
-                                 shapeSettings_.volumeDepth, forceSettings_.flowNoiseScale));
-
-    // Fake self-shadow shading direction matches the overhead key light's
-    // actual angle, so the floor's light pool (gfx/VoidFloor) and the
-    // fog's own brighter/dimmer sides agree on where "up toward the
-    // light" is.
-    fog_->SetShading(Vector3Subtract(lightingSettings_.overheadLightPos, shapeSettings_.fieldCenter), lightingSettings_.shadeAmbientFloor);
+    fog_.Init(shaders, renderer, *shapeField_);
+    // fog_.Update() (called every frame, before Draw() -- see App::Run's
+    // Update-then-Draw order) re-applies shading/forces from current
+    // settings each frame, including the very first frame after this
+    // Init/Rebuild, so there's no separate one-time setup needed here.
 
     floor_.Init(shaders);
 
@@ -62,29 +50,22 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     float morphTarget = Clamp(shapeSettings_.morphForce, 0.0f, shapeSettings_.morphMax);
     morphStrength_ += (morphTarget - morphStrength_) * std::min(1.0f, frame.dt * shapeSettings_.morphEaseRate);
 
-    fog_->SetForce(shapeConformForceIndex_,
-        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, morphStrength_, shapeSettings_.recruitFraction,
-                                 shapeSettings_.volumeDepth, forceSettings_.flowNoiseScale));
-
-    // Forces are re-pushed every frame so panel edits apply live -- see
-    // ui::FogForceSettings.
-    fog_->SetForce(gravityForceIndex_,
-        gpu_force::GravityWell(shapeSettings_.fieldCenter, forceSettings_.gravityStrength, forceSettings_.gravitySoftening));
-    fog_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(forceSettings_.turbulenceStrength, forceSettings_.turbulenceScale));
-    fog_->SetForce(dragForceIndex_, gpu_force::Drag(forceSettings_.dragCoefficient));
-
-    // Cheap CPU-side (two field writes -- see GpuParticleSystem::SetShading),
-    // so re-calling every frame is fine and is what makes Lighting's
-    // Overhead Light Position / Shade Ambient Floor live-tunable.
-    fog_->SetShading(Vector3Subtract(lightingSettings_.overheadLightPos, shapeSettings_.fieldCenter), lightingSettings_.shadeAmbientFloor);
-
-    // The shape target re-bakes whenever shapeType actually changes, from
-    // *either* the keyboard ('S' -> CycleShapePreset -> shapeSettings_.shapeType)
-    // or the settings panel's Shape combo editing shapeSettings_.shapeType
+    // The shape target re-bakes whenever shapeType, Field Center, or Shape
+    // Grid Half-Extent actually change, from *either* the keyboard ('S' ->
+    // CycleShapePreset -> shapeSettings_.shapeType) or the settings panel
     // directly -- both funnel through this one check, so there's exactly
-    // one place that talks to shapeProvider_/shapeField_.
-    if (shapeSettings_.shapeType != static_cast<int>(shapeProvider_->Type())) {
+    // one place that talks to shapeProvider_/shapeField_. Center/half-extent
+    // are compared against shapeField_'s own authoritative values (not a
+    // cached copy) since those two are applied live -- see
+    // ShapeField::SetCenter/SetHalfExtent's comment -- unlike gridResolution
+    // (voxel count, requires a full SSBO reallocation via Rebuild Systems).
+    bool needsRebake = shapeSettings_.shapeType != static_cast<int>(shapeProvider_->Type())
+        || Vector3Distance(shapeSettings_.fieldCenter, shapeField_->Center()) > 0.0001f
+        || fabsf(shapeSettings_.gridHalfExtent - shapeField_->HalfExtent()) > 0.0001f;
+    if (needsRebake) {
         shapeProvider_->SetType(static_cast<ProceduralShapeType>(shapeSettings_.shapeType));
+        shapeField_->SetCenter(shapeSettings_.fieldCenter);
+        shapeField_->SetHalfExtent(shapeSettings_.gridHalfExtent);
         shapeProvider_->BakeInto(*shapeField_, 0.0f);
     }
 
@@ -115,53 +96,12 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     coreLightIntensity_ = (lightingSettings_.intensityBase + frame.audio.Energy() * lightingSettings_.intensityEnergyScale +
                             beatFlash_ * lightingSettings_.intensityBeatFlashScale) * frame.intensity;
 
-    // Emission: every particle is born already on (or just off) the
-    // *current* shape's surface via GpuEmitMode::ShapeSurface -- a single
-    // Newton/gradient step against the bound ShapeField (see
-    // particle_emit.comp), not a slow drift-in from a diffuse spawn
-    // volume. This is the standard professional-VFX pattern for
-    // "structure that reacts instantly": bias birth position by the SDF
-    // instead of relying purely on a force to drag particles there over
-    // several seconds.
-    //
-    // Life is differentiated (ep.life vs ep.shedLife, both gated by
-    // ep.recruitFraction -- see particle_emit.comp and
-    // GpuEmitParams::recruitFraction): the recruited fraction
-    // (ShapeSettings::recruitFraction) gets a long life and is what the
-    // ShapeConform force actually holds onto the shape, so it persists
-    // across a shape change and *flows* from the old silhouette to the new
-    // one -- this is what makes the whole thing read as one volume
-    // morphing, not a fresh population replacing the old one. Only the
-    // fraction that misses recruitment gets a short life, reading as
-    // occasional wisps peeling off and dissipating. Constant/not
+    // Delegates forces/shading/emission/sim-update to the emitter itself --
+    // see ShapeFogEmitter::Update for the SDF-biased-spawn and recruited/
+    // shed-lifecycle reasoning that used to live inline here. Not
     // audio-driven -- see the class comment.
-    spawnAccumulator_ += frame.dt * emissionSettings_.spawnRate;
-    int spawnCount = static_cast<int>(spawnAccumulator_);
-    if (spawnCount > 0) {
-        spawnAccumulator_ -= static_cast<float>(spawnCount);
-
-        GpuEmitParams ep;
-        ep.mode = GpuEmitMode::ShapeSurface;
-        ep.position = shapeSettings_.fieldCenter;
-        ep.positionJitter = { shapeSettings_.candidateHalfExtent, shapeSettings_.candidateHalfExtent, shapeSettings_.candidateHalfExtent };
-        ep.shellThickness = shapeSettings_.shellThickness;
-        ep.velocity = emissionSettings_.velocity;
-        ep.velocityJitter = emissionSettings_.velocityJitter;
-
-        ep.colorA = emissionSettings_.colorA;
-        ep.colorB = emissionSettings_.colorB;
-
-        ep.size = emissionSettings_.size;
-        ep.sizeJitter = emissionSettings_.sizeJitter;
-
-        ep.life = emissionSettings_.life;
-        ep.lifeJitter = emissionSettings_.lifeJitter;
-        ep.recruitFraction = shapeSettings_.recruitFraction;
-        ep.shedLife = emissionSettings_.shedLife;
-        ep.shedLifeJitter = emissionSettings_.shedLifeJitter;
-
-        fog_->Emit(ep, spawnCount);
-    }
+    fog_.Update(frame.dt, frame.time, *shapeField_, morphStrength_,
+                Vector3Subtract(lightingSettings_.overheadLightPos, shapeField_->Center()), lightingSettings_.shadeAmbientFloor);
 
     // Lightning: strong beats fire a bolt; a short cooldown keeps a burst
     // of rapid beats from spawning bolts on top of each other.
@@ -170,10 +110,9 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     bool fireLightning = strongBeat && lightningCooldown_ <= 0.0f;
     float lightningStrength = Clamp(frame.audio.BeatIntensity() + frame.audio.Treble(), 0.0f, 1.0f);
 
-    lightning_.Update(frame.dt, shapeSettings_.fieldCenter, fireLightning, lightningStrength, lightningSettings_);
+    lightning_.Update(frame.dt, shapeField_->Center(), fireLightning, lightningStrength, lightningSettings_);
     if (fireLightning) lightningCooldown_ = lightningSettings_.cooldownSeconds;
 
-    fog_->Update(frame.dt, frame.time);
     lastTime_ = frame.time; // Draw() is const with no FrameContext of its own -- see the member's comment
 }
 
@@ -255,8 +194,15 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // overhead-light entry here deliberately -- see the class comment
     // and FogLightingSettings::overheadLightPos's comment: it's not a real
     // light on the particles, only a shading angle and a floor-pool center.
+    // Reads shapeField_->Center(), not shapeSettings_.fieldCenter directly:
+    // Update() (which keeps the two in sync -- see its rebake check) is
+    // skipped while paused (see App::Run's `if (!paused_)` guard), so a
+    // live Field Center drag while paused would otherwise light the fog
+    // from a position the actual baked field hasn't moved to yet -- the
+    // same class of desync Bug 1 was, just reachable through a different
+    // path.
     std::array<LightSample, kMaxParticleLights> lights{};
-    lights[0] = LightSample{ shapeSettings_.fieldCenter, coreLightIntensity_, coreLightColor_ };
+    lights[0] = LightSample{ shapeField_->Center(), coreLightIntensity_, coreLightColor_ };
     int lightCount = 1 + lightning_.GatherLights(lights.data() + 1, kMaxParticleLights - 1);
 
     // Standard alpha blending, not additive: the fog is meant to read as
@@ -267,16 +213,10 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // for dense smoke/fog (an order-independent-transparency shortcut),
     // not a shortcut specific to this engine.
     BeginBlendMode(BLEND_ALPHA);
-    if (fog_) {
-        // fadeMode 2 (particle_render.vert's two-sided fade, in over the
-        // first ~25% of life and out over the final ~17%) instead of 1
-        // (instant-full-opacity-at-spawn): with mode 1 every newly
-        // spawned particle snapped to full brightness the instant it
-        // existed, which read as a visible "pop in" no matter how the
-        // lifecycle/spawn-rate was tuned.
-        fog_->Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, /*fadeMode=*/2, /*sizeScale=*/1.0f,
-                   lights.data(), lightCount, lastTime_);
-    }
+    // fadeMode/sizeScale are fixed inside ShapeFogEmitter::Draw -- see its
+    // own comment on why neither has needed to vary per-call.
+    int spriteStyle = (ctx.debug != nullptr && ctx.debug->disableSpriteNoise) ? 0 : 1;
+    fog_.Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, lights.data(), lightCount, lastTime_, spriteStyle);
     EndBlendMode();
 
     // Lightning bolts are genuinely light-emitting, so additive is the
@@ -286,12 +226,28 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     EndBlendMode();
 
     // Debug gizmos: opaque, default blend, drawn last/on top -- see
-    // ui::DebugSettings and RenderContext::debug's comment.
-    if (ctx.debug != nullptr) {
-        const Vector3 center = shapeSettings_.fieldCenter;
+    // ui::DebugSettings and RenderContext::debug's comment. Every gizmo
+    // below reads shapeField_'s own accessors (Center/HalfExtent), never
+    // shapeSettings_.fieldCenter/gridHalfExtent directly -- shapeField_ is
+    // the actual object the sim samples (see ShapeField::SetCenter's
+    // comment: those two settings apply to it live, same-frame), so a
+    // gizmo built from it structurally cannot drift out of sync the way
+    // reading a separate settings mirror could.
+    if (ctx.debug != nullptr && shapeField_) {
+        const Vector3 center = shapeField_->Center();
+        const float halfExtent = shapeField_->HalfExtent();
+        const int resolution = shapeField_->Resolution();
 
         if (ctx.debug->showShapeBounds) {
             DrawShapeWireframe(static_cast<ProceduralShapeType>(shapeSettings_.shapeType), center, Fade(SKYBLUE, 0.5f));
+            // Bake-grid extent (the actual sampled volume), distinct from
+            // the shape wireframe above -- lets grid resolution/extent be
+            // visually cross-checked against where the shape sits inside it.
+            float gridSize = halfExtent * 2.0f;
+            DrawCubeWiresV(center, Vector3{ gridSize, gridSize, gridSize }, Fade(DARKPURPLE, 0.35f));
+            float voxelSize = gridSize / static_cast<float>(resolution);
+            DrawCubeWiresV(center - Vector3{ halfExtent, halfExtent, halfExtent } + Vector3{ voxelSize * 0.5f, voxelSize * 0.5f, voxelSize * 0.5f },
+                           Vector3{ voxelSize, voxelSize, voxelSize }, Fade(MAGENTA, 0.6f));
         }
 
         if (ctx.debug->showFieldAxes) {
@@ -315,15 +271,28 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
         }
 
         if (ctx.debug->showEmitterBounds) {
-            float ext = shapeSettings_.candidateHalfExtent * 2.0f;
+            float ext = fog_.attraction.candidateHalfExtent * 2.0f;
             DrawCubeWiresV(center, Vector3{ ext, ext, ext }, Fade(GREEN, 0.6f));
         }
 
         if (ctx.debug->showForceVectors) {
             ProceduralShapeType curType = static_cast<ProceduralShapeType>(shapeSettings_.shapeType);
             constexpr float kShellRadius = 4.0f;
-            constexpr float kArrowLength = 0.6f;
             constexpr int kLatSteps = 6, kLonSteps = 8;
+            // Arrow lengths scale with the *actual* current strength
+            // settings (not a fixed idealized length) so the gizmo visibly
+            // grows/shrinks as Gravity Strength/Shape Attraction are tuned
+            // -- a fixed-length arrow that never responds to the setting
+            // it's supposedly showing is worse than no gizmo at all. Scale
+            // factors are just a legible-on-screen mapping, not physically
+            // literal. Shape-attraction is additionally skipped entirely
+            // once morphStrength_ is negligible, matching
+            // ApplyShapeConform's own early-out (shape_conform.glsl) -- no
+            // attraction is actually being applied at that point, so no
+            // arrow should claim otherwise.
+            float gravityArrowLen = Clamp(fog_.force.gravityStrength * 0.4f, 0.0f, 1.5f);
+            bool showAttraction = morphStrength_ > 0.0001f;
+            float attractArrowLen = Clamp(fog_.force.shapeAttraction * morphStrength_ * 0.25f, 0.0f, 1.5f);
             for (int lat = 1; lat < kLatSteps; lat++) {
                 float theta = PI * float(lat) / kLatSteps; // polar angle; skip the exact poles
                 for (int lon = 0; lon < kLonSteps; lon++) {
@@ -333,19 +302,31 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
 
                     // Gravity: closed-form, mirrors forces.glsl's
                     // FORCE_GRAVITY_WELL exactly (direction only -- actual
-                    // magnitude varies by orders of magnitude across the
-                    // shell and isn't useful to show at gizmo-arrow scale).
-                    Vector3 toCenter = Vector3Subtract(center, samplePos);
-                    Vector3 gravityDir = Vector3Normalize(toCenter);
-                    DrawLine3D(samplePos, samplePos + Vector3Scale(gravityDir, kArrowLength), SKYBLUE);
+                    // per-particle magnitude also depends on distance/
+                    // softening and isn't useful to show at gizmo-arrow
+                    // scale; only the overall strength setting is reflected
+                    // in the arrow length above).
+                    if (gravityArrowLen > 0.0001f) {
+                        Vector3 toCenter = Vector3Subtract(center, samplePos);
+                        Vector3 gravityDir = Vector3Normalize(toCenter);
+                        DrawLine3D(samplePos, samplePos + Vector3Scale(gravityDir, gravityArrowLen), SKYBLUE);
+                    }
 
                     // Shape-attraction direction: points from outside
                     // toward the surface, mirroring shape_conform.glsl's
                     // -sign(dist)*gradient (see EvalShapeGradient above).
-                    Vector3 grad = EvalShapeGradient(curType, samplePos);
-                    float dist = EvalShapeSdf(curType, samplePos);
-                    Vector3 attractDir = Vector3Scale(grad, dist > 0.0f ? -1.0f : 1.0f);
-                    DrawLine3D(samplePos, samplePos + Vector3Scale(attractDir, kArrowLength), ORANGE);
+                    // Assumes Volume Depth == 0 (exact-surface targeting) --
+                    // with Volume Depth > 0 each particle's actual target
+                    // depth is a per-particle random roll (see
+                    // ApplyShapeConform's targetDist) this gizmo can't
+                    // cheaply replicate point-by-point, so it always shows
+                    // the surface-normal case as a known simplification.
+                    if (showAttraction) {
+                        Vector3 grad = EvalShapeGradient(curType, samplePos);
+                        float dist = EvalShapeSdf(curType, samplePos);
+                        Vector3 attractDir = Vector3Scale(grad, dist > 0.0f ? -1.0f : 1.0f);
+                        DrawLine3D(samplePos, samplePos + Vector3Scale(attractDir, attractArrowLen), ORANGE);
+                    }
                 }
             }
         }
@@ -373,6 +354,23 @@ const char* NeonFogVisualizer::ExtraStatusLine() const {
         shapeSettings_.autoCycle ? TextFormat("  Next in: %.1fs", secondsToNext) : "");
 }
 
+const char* NeonFogVisualizer::DebugInfoText() const {
+    if (!shapeField_) return nullptr;
+    Vector3 c = shapeField_->Center();
+    float halfExtent = shapeField_->HalfExtent();
+    int res = shapeField_->Resolution();
+    float voxelSize = (halfExtent * 2.0f) / static_cast<float>(res);
+    return TextFormat(
+        "Grid: %dx%dx%d over %.1f world units (voxel %.3f)\n"
+        "Field Center: (%.2f, %.2f, %.2f)\n"
+        "Shape: %s  Morph: %.0f%%\n"
+        "Core Light: (%d,%d,%d) x %.2f",
+        res, res, res, halfExtent * 2.0f, voxelSize,
+        c.x, c.y, c.z,
+        ShapeName(shapeProvider_->Type()), morphStrength_ * 100.0f,
+        coreLightColor_.r, coreLightColor_.g, coreLightColor_.b, coreLightIntensity_);
+}
+
 void NeonFogVisualizer::CycleShapePreset() {
     // Walks Sphere -> Box -> Torus -> Cylinder -> Sphere ... Never disables
     // the shape entirely -- to see pure ambient fog, drive Morph Force to
@@ -394,12 +392,12 @@ void NeonFogVisualizer::AdjustPrimary(float delta) {
 }
 
 void NeonFogVisualizer::VisitSettings(ui::IParamVisitor& v) {
-    v.BeginGroup("Emission");
-    emissionSettings_.Visit(v);
-    v.EndGroup();
-
-    v.BeginGroup("Forces");
-    forceSettings_.Visit(v);
+    // fog_'s own Emission/Forces/Attraction groups -- see
+    // ShapeFogEmitter::VisitSettings. A second emitter member would add
+    // one more BeginGroup(name)/fog2_.VisitSettings(v)/EndGroup() here,
+    // no duplicated logic.
+    v.BeginGroup("Fog");
+    fog_.VisitSettings(v);
     v.EndGroup();
 
     v.BeginGroup("Shape");

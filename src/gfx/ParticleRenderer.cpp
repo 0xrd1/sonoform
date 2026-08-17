@@ -17,6 +17,7 @@ ParticleRenderer::ParticleRenderer(ShaderLibrary& shaders) {
     locLightColors_ = GetShaderLocation(shader_, "uLightColors");
     locLightCount_ = GetShaderLocation(shader_, "uLightCount");
     locTime_ = GetShaderLocation(shader_, "uTime");
+    locSpriteStyle_ = GetShaderLocation(shader_, "uSpriteStyle");
 
     // No vertex buffer is ever bound -- particle_render.vert generates
     // every quad corner from gl_VertexID -- but core-profile GL still
@@ -32,7 +33,7 @@ ParticleRenderer::~ParticleRenderer() {
 
 void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                              int fadeMode, float sizeScale, const LightSample* lights, int lightCount,
-                             float time) const {
+                             float time, int spriteStyle) const {
     if (instanceCount <= 0) return;
 
     rlEnableShader(shader_.id);
@@ -43,6 +44,7 @@ void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 c
     if (locFadeMode_ != -1) SetShaderValue(shader_, locFadeMode_, &fadeMode, SHADER_UNIFORM_INT);
     if (locSizeScale_ != -1) SetShaderValue(shader_, locSizeScale_, &sizeScale, SHADER_UNIFORM_FLOAT);
     if (locTime_ != -1) SetShaderValue(shader_, locTime_, &time, SHADER_UNIFORM_FLOAT);
+    if (locSpriteStyle_ != -1) SetShaderValue(shader_, locSpriteStyle_, &spriteStyle, SHADER_UNIFORM_INT);
 
     int clampedCount = lightCount < 0 ? 0 : (lightCount > kMaxParticleLights ? kMaxParticleLights : lightCount);
     if (locLightCount_ != -1) SetShaderValue(shader_, locLightCount_, &clampedCount, SHADER_UNIFORM_INT);

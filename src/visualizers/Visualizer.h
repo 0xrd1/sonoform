@@ -67,6 +67,15 @@ public:
     // preset). Return nullptr (the default) to show nothing.
     virtual const char* ExtraStatusLine() const { return nullptr; }
 
+    // Optional multi-line numeric readout for the Debug View window (see
+    // src/ui/EngineUi.h's DrawDebugWindow) -- for precise values (grid
+    // resolution, voxel size, field center, current light color/intensity)
+    // that a 3D gizmo communicates poorly. Same rotating-TextFormat-buffer
+    // convention as ExtraStatusLine: the returned pointer is only valid
+    // until the next TextFormat call, so callers must use it immediately.
+    // Return nullptr (the default) to show nothing.
+    virtual const char* DebugInfoText() const { return nullptr; }
+
     // Optional visualizer-specific action bound to a dedicated key (e.g.
     // cycling a shape preset). Default no-op.
     virtual void SecondaryAction() {}

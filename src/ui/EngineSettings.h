@@ -118,11 +118,16 @@ struct FogForceSettings {
 
 // -----------------------------------------------------------------------
 // Neon Fog: the SDF shape target, its bake grid, and the morph driver.
+// Shared, visualizer-level state -- describes *what the target shape is*,
+// not how any one particle population relates to it (see
+// FogAttractionSettings below, owned per-emitter).
 // -----------------------------------------------------------------------
 struct ShapeSettings {
-    // Grid resolution/extent and field center are baked into the ShapeField
-    // at construction -- see ShapeField::ShapeField -- so changing them here
-    // only takes effect after "Rebuild Systems".
+    // Grid resolution is baked into the ShapeField's SSBO at construction
+    // (voxel count -- see ShapeField::ShapeField), so changing it only
+    // takes effect after "Rebuild Systems". Grid half-extent and field
+    // center are applied live instead -- see ShapeField::SetCenter/
+    // SetHalfExtent and NeonFogVisualizer::Update's rebake check.
     int gridResolution = 40;
     float gridHalfExtent = 6.0f;
     Vector3 fieldCenter{ 0.0f, 2.0f, 0.0f };
@@ -130,15 +135,6 @@ struct ShapeSettings {
     int shapeType = 0;                  // indexes ProceduralShapeType; see ShapeTypeNames() below
     bool autoCycle = true;
     float cycleSeconds = 15.0f;         // long enough to actually take in a shape's form before it changes
-
-    float candidateHalfExtent = 3.5f;   // spawn candidate box half-extent, projected onto the field
-    float shellThickness = 0.2f;        // +/- offset along the surface normal after projection
-    float recruitFraction = 0.85f;      // fraction that gets Core Life (vs. Shed Life) and stays locked to the shape
-    // 0 = every recruited particle targets the exact shape surface (a hollow
-    // lit skin). >0 = each spreads across nested iso-surfaces down to this
-    // depth instead (a solid glowing body) -- see ApplyShapeConform in
-    // shapes/shape_conform.glsl. One continuous surface<->volume control.
-    float volumeDepth = 0.0f;
 
     float morphForce = 1.0f;            // independent driver, also nudged live via '-'/'='
     float morphMax = 1.5f;
@@ -155,12 +151,37 @@ struct ShapeSettings {
         v.Int(gridResolution, d.gridResolution, 8, 96,
             { "Shape Grid Resolution", "Voxel resolution of the baked SDF grid per axis. Higher = smoother shape surfaces, cubically more bake cost.", ParamFlags::NeedsRebuild });
         v.Float(gridHalfExtent, d.gridHalfExtent, 2.0f, 20.0f,
-            { "Shape Grid Half-Extent", "World-space half-size of the bake grid. Must comfortably exceed the largest shape's radius plus the spawn candidate box, or samples clamp to the edge instead of the real surface.", ParamFlags::NeedsRebuild });
+            { "Shape Grid Half-Extent", "World-space half-size of the bake grid. Must comfortably exceed the largest shape's radius plus the spawn candidate box, or samples clamp to the edge instead of the real surface. Live -- ShapeField re-bakes in place when this changes, no Rebuild Systems needed." });
         v.Vec3(fieldCenter, d.fieldCenter, -20.0f, 20.0f,
-            { "Field Center", "World-space center of the shape/gravity/lighting system. Baked into the ShapeField at construction.", ParamFlags::NeedsRebuild });
+            { "Field Center", "World-space center of the shape/gravity/lighting system. Live -- ShapeField re-bakes in place when this changes, no Rebuild Systems needed." });
         v.Enum(shapeType, d.shapeType, ShapeTypeNames(), kShapeTypeCount, { "Shape", "Current analytic SDF target. Selecting one re-bakes the field immediately." });
         v.Bool(autoCycle, d.autoCycle, { "Auto-Cycle", "Advance through shapes on a fixed timer (also toggled by 'M')." });
         v.Float(cycleSeconds, d.cycleSeconds, 1.0f, 60.0f, { "Cycle Seconds", "How long a shape holds before auto-cycling to the next." });
+        v.Float(morphForce, d.morphForce, 0.0f, morphMax,
+            { "Morph Force", "Independent driver for shape attraction, deliberately not derived from audio -- 0 dissolves all structure back into ambient fog. Also nudged by '-'/'='." });
+        v.Float(morphMax, d.morphMax, 0.5f, 3.0f, { "Morph Force Max", "Upper clamp on Morph Force." });
+        v.Float(morphEaseRate, d.morphEaseRate, 0.1f, 10.0f, { "Morph Ease Rate", "How fast the applied morph strength eases toward Morph Force (per second). Higher snaps faster; lower reads as more organic emergence/dissolution." });
+    }
+};
+
+// -----------------------------------------------------------------------
+// Neon Fog: how a single particle population (a ShapeFogEmitter) relates
+// to the shared ShapeField target -- per-emitter, unlike ShapeSettings
+// above. A second emitter attracted to the same shape (different color/
+// size/behavior) gets its own FogAttractionSettings instance.
+// -----------------------------------------------------------------------
+struct FogAttractionSettings {
+    float candidateHalfExtent = 3.5f;   // spawn candidate box half-extent, projected onto the field
+    float shellThickness = 0.2f;        // +/- offset along the surface normal after projection
+    float recruitFraction = 0.85f;      // fraction that gets Core Life (vs. Shed Life) and stays locked to the shape
+    // 0 = every recruited particle targets the exact shape surface (a hollow
+    // lit skin). >0 = each spreads across nested iso-surfaces down to this
+    // depth instead (a solid glowing body) -- see ApplyShapeConform in
+    // shapes/shape_conform.glsl. One continuous surface<->volume control.
+    float volumeDepth = 0.0f;
+
+    void Visit(IParamVisitor& v) {
+        FogAttractionSettings d;
         v.Float(candidateHalfExtent, d.candidateHalfExtent, 0.5f, 10.0f,
             { "Spawn Candidate Extent", "Half-size of the box new particles' birth position is chosen from before being projected onto the shape surface. Must stay within Shape Grid Half-Extent with margin." });
         v.Float(shellThickness, d.shellThickness, 0.0f, 2.0f, { "Shell Thickness", "Random offset along the surface normal after projection, so the birth shell isn't a razor-thin surface." });
@@ -168,10 +189,6 @@ struct ShapeSettings {
             { "Recruit Fraction", "Fraction of new particles that get Core Life and stay locked to the shape (vs. Shed Life haze). High = the volume reads as one coherent mass." });
         v.Float(volumeDepth, d.volumeDepth, 0.0f, 4.0f,
             { "Volume Depth", "0 = particles hug the exact surface (a hollow lit skin). Raise it and they instead spread across nested depths inside the shape (a solid glowing body) -- a continuous surface<->volume control, not a fixed toggle." });
-        v.Float(morphForce, d.morphForce, 0.0f, morphMax,
-            { "Morph Force", "Independent driver for shape attraction, deliberately not derived from audio -- 0 dissolves all structure back into ambient fog. Also nudged by '-'/'='." });
-        v.Float(morphMax, d.morphMax, 0.5f, 3.0f, { "Morph Force Max", "Upper clamp on Morph Force." });
-        v.Float(morphEaseRate, d.morphEaseRate, 0.1f, 10.0f, { "Morph Ease Rate", "How fast the applied morph strength eases toward Morph Force (per second). Higher snaps faster; lower reads as more organic emergence/dissolution." });
     }
 };
 
@@ -364,6 +381,7 @@ struct DebugSettings {
     bool showFieldAxes = false;
     bool showEmitterBounds = false;
     bool showForceVectors = false;
+    bool disableSpriteNoise = false; // compare the raw circular sprite against the styled wispy look
 
     void Visit(IParamVisitor& v) {
         DebugSettings d;
@@ -377,6 +395,8 @@ struct DebugSettings {
             { "Emitter Bounds", "Wireframe box showing the region new particles' spawn candidates are drawn from before being projected onto the shape surface." });
         v.Bool(showForceVectors, d.showForceVectors,
             { "Force Vectors", "Sampled gravity and shape-attraction direction arrows on a coarse shell around the shape. Turbulence/curl-noise isn't shown -- not cheap to mirror on the CPU without a GPU readback." });
+        v.Bool(disableSpriteNoise, d.disableSpriteNoise,
+            { "Disable Sprite Noise", "Compare the raw circular sprite (off) against the styled wispy noise-mask look (on, the default render)." });
     }
 };
 

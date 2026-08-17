@@ -193,7 +193,7 @@ void GpuParticleSystem::DebugDumpFirst(int count) const {
 
 void GpuParticleSystem::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                               int fadeMode, float sizeScale,
-                              const LightSample* lights, int lightCount, float time) const {
+                              const LightSample* lights, int lightCount, float time, int spriteStyle) const {
     particleBuffer_.BindBase(gpu_bindings::kParticleBuffer);
-    renderer_.Draw(capacity_, viewProj, cameraRight, cameraUp, fadeMode, sizeScale, lights, lightCount, time);
+    renderer_.Draw(capacity_, viewProj, cameraRight, cameraUp, fadeMode, sizeScale, lights, lightCount, time, spriteStyle);
 }

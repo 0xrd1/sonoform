@@ -121,7 +121,18 @@ bool App::Init(const std::string& audioPathArg) {
         startupState.visualizers = &visualizers_;
         startupState.camera = &cameraSettings_;
         startupState.post = &postSettings_;
-        ui::LoadDefaultSettings(startupState);
+        // If a default.ini existed and was actually loaded, the GPU state
+        // built by visualizers_.Add() above (using pre-load hardcoded
+        // defaults) may now disagree with the just-loaded settings for any
+        // NeedsRebuild field (capacity, grid resolution, ...) -- rebuild
+        // once so frame one already matches what the panel displays,
+        // instead of silently drifting until the user notices and clicks
+        // Rebuild Systems themselves. RebuildCurrent is idempotent/cheap to
+        // call speculatively (see its own doc comment); a no-op first run
+        // (no default.ini yet) skips this entirely.
+        if (ui::LoadDefaultSettings(startupState)) {
+            visualizers_.RebuildCurrent(shaderLibrary_, *particleRenderer_);
+        }
     }
 
     return true;

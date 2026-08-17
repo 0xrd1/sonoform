@@ -22,6 +22,7 @@ public:
     const char* CurrentName() const;
     int CurrentParticleCount() const;
     const char* CurrentExtraStatusLine() const;
+    const char* CurrentDebugInfoText() const;
     void SecondaryActionOnCurrent();
     void TertiaryActionOnCurrent();
     void AdjustPrimaryOnCurrent(float delta);

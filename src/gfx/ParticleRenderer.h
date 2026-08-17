@@ -27,10 +27,12 @@ public:
     // on why that matters for a shader program shared across visualizers.
     // `time` drives the slow shimmer in particle_render.frag's noise-mask
     // sprite breakup; defaults to 0.0 (a static, still-correct mask) for
-    // callers that don't track elapsed time.
+    // callers that don't track elapsed time. `spriteStyle`: 0 = clean
+    // circular sprite, 1 (default) = noise-broken wispy look -- see
+    // particle_render.frag's uSpriteStyle.
     void Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode, float sizeScale, const LightSample* lights = nullptr, int lightCount = 0,
-              float time = 0.0f) const;
+              float time = 0.0f, int spriteStyle = 1) const;
 
 private:
     Shader shader_{};
@@ -45,4 +47,5 @@ private:
     int locLightColors_ = -1;
     int locLightCount_ = -1;
     int locTime_ = -1;
+    int locSpriteStyle_ = -1;
 };

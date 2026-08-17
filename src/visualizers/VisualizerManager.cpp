@@ -46,6 +46,11 @@ const char* VisualizerManager::CurrentExtraStatusLine() const {
     return items_[static_cast<size_t>(index_)]->ExtraStatusLine();
 }
 
+const char* VisualizerManager::CurrentDebugInfoText() const {
+    if (items_.empty()) return nullptr;
+    return items_[static_cast<size_t>(index_)]->DebugInfoText();
+}
+
 void VisualizerManager::SecondaryActionOnCurrent() {
     if (items_.empty()) return;
     items_[static_cast<size_t>(index_)]->SecondaryAction();
