@@ -2,6 +2,7 @@
 #include "ShapeField.h"
 #include "raymath.h"
 #include <cmath>
+#include <algorithm>
 
 void ProceduralShapeProvider::BakeInto(ShapeField& field, float time) {
     (void)time; // analytic shapes here are static; a future animated/morphing provider would use it
@@ -49,30 +50,48 @@ void CheckAgainstRealField(const ShapeField& field, Vector3 center, Vector3 clai
 }
 } // namespace
 
-void ProceduralShapeProvider::DrawDebugWireframe(const ShapeField& field, Color color) const {
+void ProceduralShapeProvider::DrawDebugWireframe(const ShapeField& field, Color color, float offset) const {
     Vector3 center = field.Center();
+    // Self-check only makes sense against the exact surface (offset 0) --
+    // an inflated/deflated wireframe is a deliberate approximation (see
+    // ShapeProvider.h's comment), not a claim about the real baked field.
+    bool selfCheck = (offset == 0.0f);
     switch (type_) {
-        case ProceduralShapeType::Sphere:
-            DrawSphereWires(center, kSphereRadius, 12, 12, color);
-            CheckAgainstRealField(field, center, center + Vector3{ kSphereRadius, 0, 0 }, "Sphere");
+        case ProceduralShapeType::Sphere: {
+            float r = std::max(0.01f, kSphereRadius + offset);
+            DrawSphereWires(center, r, 12, 12, color);
+            if (selfCheck) CheckAgainstRealField(field, center, center + Vector3{ r, 0, 0 }, "Sphere");
             break;
-        case ProceduralShapeType::Box:
-            DrawCubeWiresV(center, Vector3{ kBoxHalfExtent * 2.0f, kBoxHalfExtent * 2.0f, kBoxHalfExtent * 2.0f }, color);
-            CheckAgainstRealField(field, center, center + Vector3{ kBoxHalfExtent, 0, 0 }, "Box");
+        }
+        case ProceduralShapeType::Box: {
+            float h = std::max(0.01f, kBoxHalfExtent + offset);
+            DrawCubeWiresV(center, Vector3{ h * 2.0f, h * 2.0f, h * 2.0f }, color);
+            if (selfCheck) CheckAgainstRealField(field, center, center + Vector3{ h, 0, 0 }, "Box");
             break;
-        case ProceduralShapeType::Torus:
+        }
+        case ProceduralShapeType::Torus: {
             // Simplified to two flat horizontal rings at the outer/inner
             // major radius rather than a full tube wireframe (per-segment
             // tangent-frame math not worth it for a debug gizmo) -- still
             // confirms scale/position at a glance, which is the gizmo's job.
-            DrawCircle3D(center, kTorusOuterRadius, Vector3{ 1, 0, 0 }, 90.0f, color);
-            DrawCircle3D(center, kTorusInnerRadius, Vector3{ 1, 0, 0 }, 90.0f, color);
-            CheckAgainstRealField(field, center, center + Vector3{ kTorusOuterRadius, 0, 0 }, "Torus");
+            // Offsetting a torus's SDF grows/shrinks its tube (minor)
+            // radius while the major radius stays fixed -- see
+            // ShapeProvider.h's comment.
+            float minor = std::max(0.01f, (kTorusOuterRadius - kTorusInnerRadius) * 0.5f + offset);
+            float major = (kTorusOuterRadius + kTorusInnerRadius) * 0.5f;
+            float outer = major + minor;
+            float inner = std::max(0.01f, major - minor);
+            DrawCircle3D(center, outer, Vector3{ 1, 0, 0 }, 90.0f, color);
+            DrawCircle3D(center, inner, Vector3{ 1, 0, 0 }, 90.0f, color);
+            if (selfCheck) CheckAgainstRealField(field, center, center + Vector3{ outer, 0, 0 }, "Torus");
             break;
-        case ProceduralShapeType::Cylinder:
-            DrawCylinderWires(center - Vector3{ 0, kCylinderHalfHeight, 0 }, kCylinderRadius, kCylinderRadius,
-                               kCylinderHalfHeight * 2.0f, 16, color);
-            CheckAgainstRealField(field, center, center + Vector3{ kCylinderRadius, 0, 0 }, "Cylinder");
+        }
+        case ProceduralShapeType::Cylinder: {
+            float r = std::max(0.01f, kCylinderRadius + offset);
+            float h = std::max(0.01f, kCylinderHalfHeight + offset);
+            DrawCylinderWires(center - Vector3{ 0, h, 0 }, r, r, h * 2.0f, 16, color);
+            if (selfCheck) CheckAgainstRealField(field, center, center + Vector3{ r, 0, 0 }, "Cylinder");
             break;
+        }
     }
 }

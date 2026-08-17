@@ -70,6 +70,16 @@ public:
     float TrebleLevel() const;
     float EnergyLevel() const;
 
+    // Spectral flux: frame-to-frame *increase* across the whole spectrum
+    // (half-wave rectified sum, i.e. only rising bins count), a standard
+    // onset-detection signal -- qualitatively different from Bass/Mid/
+    // Treble/Energy above (all magnitude), this fires on anything that
+    // *changes* (hi-hats, snares, vocal stabs, synth hits), not just
+    // sustained bass energy. Same rolling-peak normalization as
+    // BassLevel() etc., so this is also [0,1] against the track's own
+    // recent peak.
+    float FluxLevel() const;
+
 private:
     static void AudioCallback(void* buffer, unsigned int frames);
     void ProcessCallback(const float* buffer, unsigned int frames);
@@ -107,6 +117,7 @@ private:
         // comment in the header for why these exist alongside the raw
         // fields above rather than replacing them.
         float bassLevel = 0.0f, midLevel = 0.0f, trebleLevel = 0.0f, energyLevel = 0.0f;
+        float fluxLevel = 0.0f;
     };
     mutable std::mutex snapshotMutex_;
     AudioSnapshot snapshot_;
@@ -115,7 +126,13 @@ private:
     // time-based decay (not a fixed sample window) for the same reason
     // avgBassEnergy_'s lag below is time-based: Update()'s calling cadence
     // is a dedicated ~120Hz thread, not tied to the render frame rate.
-    float bassPeak_ = 0.0f, midPeak_ = 0.0f, treblePeak_ = 0.0f, energyPeak_ = 0.0f;
+    float bassPeak_ = 0.0f, midPeak_ = 0.0f, treblePeak_ = 0.0f, energyPeak_ = 0.0f, fluxPeak_ = 0.0f;
+
+    // Previous call's spectrum, diffed against the current one to compute
+    // flux -- see FluxLevel()'s comment. Separate from smoothedSpectrum_
+    // (which Update() overwrites in place each call): this needs last
+    // call's *values*, not a smoothing target.
+    std::array<float, kSpectrumBins> prevSpectrum_{};
 
     // Rolling bass average the beat detector compares against, and how
     // long Update() has been running -- both time-based (a first-order

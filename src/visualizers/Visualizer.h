@@ -54,6 +54,24 @@ public:
 
     virtual void Update(const FrameContext& frame) = 0;
 
+    // Optional hook for off-screen work that needs its own render target
+    // *outside* the main scene's framebuffer -- called by App::Draw()
+    // before PostProcess::BeginScene()/BeginMode3D(), deliberately with no
+    // RenderContext (none of that -- the main camera, viewProj, bloom
+    // scene target -- exists yet at this point in the frame). raylib's
+    // BeginTextureMode/EndTextureMode don't nest: EndTextureMode
+    // unconditionally rebinds the screen framebuffer rather than
+    // restoring whatever was bound before it (see rcore.c), so any
+    // render-to-texture pass a visualizer needs (e.g. NeonFogVisualizer's
+    // top-down particle shadow map) MUST happen here, before the main
+    // scene's own BeginTextureMode is active, not inside Draw(). Non-const
+    // (unlike Draw()): the whole point of this hook is producing new GPU
+    // state (a texture) for Draw() to read, e.g. caching the render's
+    // extent for Draw()'s later shader uniforms -- Draw() itself stays
+    // const, this is what feeds it. Default no-op, so no other visualizer
+    // needs to know this exists.
+    virtual void PreDraw() {}
+
     // Called inside BeginMode3D/EndMode3D with additive blending active.
     virtual void Draw(const RenderContext& ctx) const = 0;
 

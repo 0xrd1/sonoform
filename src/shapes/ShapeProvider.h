@@ -26,6 +26,14 @@ public:
     // approximation by resampling the baked field. `field` is provided
     // (not just a center) so an implementation can also cross-check
     // itself against the real baked data via field.SampleWorld() -- see
-    // ProceduralShapeProvider's override.
-    virtual void DrawDebugWireframe(const ShapeField& /*field*/, Color /*color*/) const {}
+    // ProceduralShapeProvider's override. `offset` draws an approximate
+    // SDF offset-surface instead of the exact one (0, the default) --
+    // positive grows the shape outward, negative shrinks it inward -- by
+    // adjusting each primitive's own characteristic radius/half-extent by
+    // `offset`, which is exact for a sphere/box and a close approximation
+    // for a torus/cylinder. Used by the Shell/Volume Bounds gizmo (see
+    // NeonFogVisualizer::Draw) to visualize Shell Thickness (+/-offset)
+    // and Volume Depth (-offset) without needing a second wireframe
+    // implementation.
+    virtual void DrawDebugWireframe(const ShapeField& /*field*/, Color /*color*/, float /*offset*/ = 0.0f) const {}
 };

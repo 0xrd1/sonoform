@@ -32,10 +32,14 @@ public:
     // circular sprite, 1 (default) = noise-broken wispy look -- see
     // particle_render.frag's uSpriteStyle.
     // `palette` defaults to PaletteMode::Off, an exact no-op against every
-    // call site that doesn't pass one -- see gfx/PaletteParams.h.
+    // call site that doesn't pass one -- see gfx/PaletteParams.h. `alphaScale`
+    // defaults to 1.0 (an exact no-op); see particle_render.frag's
+    // uAlphaScale comment -- only NeonFogVisualizer::PreDraw's shadow-map
+    // pass ever sets it to anything else.
     void Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode, float sizeScale, const LightSample* lights = nullptr, int lightCount = 0,
-              float time = 0.0f, int spriteStyle = 1, const PaletteParams& palette = PaletteParams{}) const;
+              float time = 0.0f, int spriteStyle = 1, const PaletteParams& palette = PaletteParams{},
+              float alphaScale = 1.0f) const;
 
 private:
     Shader shader_{};
@@ -51,6 +55,7 @@ private:
     int locLightCount_ = -1;
     int locTime_ = -1;
     int locSpriteStyle_ = -1;
+    int locAlphaScale_ = -1;
 
     int locPaletteMode_ = -1;
     int locPaletteCenter_ = -1;

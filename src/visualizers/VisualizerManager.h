@@ -17,6 +17,7 @@ public:
     void SetIndex(int i);
 
     void Update(const FrameContext& frame);
+    void PreDraw();
     void Draw(const RenderContext& ctx) const;
 
     const char* CurrentName() const;

@@ -26,6 +26,11 @@ void VisualizerManager::Update(const FrameContext& frame) {
     items_[static_cast<size_t>(index_)]->Update(frame);
 }
 
+void VisualizerManager::PreDraw() {
+    if (items_.empty()) return;
+    items_[static_cast<size_t>(index_)]->PreDraw();
+}
+
 void VisualizerManager::Draw(const RenderContext& ctx) const {
     if (items_.empty()) return;
     items_[static_cast<size_t>(index_)]->Draw(ctx);

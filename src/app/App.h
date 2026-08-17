@@ -133,6 +133,11 @@ private:
     // raylib/GLFW when perfSettings_ actually changed since last frame.
     bool lastVsync_ = perfSettings_.vsync;
     int lastTargetFps_ = perfSettings_.targetFps;
+    // Forces ApplyPerformanceSettings' very first call to actually apply
+    // both values to raylib, regardless of whether they happen to equal
+    // lastVsync_/lastTargetFps_'s own (matching) defaults above -- see
+    // that function's comment for the bug this fixes.
+    bool perfSettingsApplied_ = false;
     bool paused_ = false;
     float elapsedTime_ = 0.0f;
     bool showHud_ = true;

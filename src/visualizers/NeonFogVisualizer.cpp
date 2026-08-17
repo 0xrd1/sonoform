@@ -28,19 +28,26 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
 
     floor_.Init(shaders);
 
+    // Reallocating on every Init() (including "Rebuild Systems") is fine --
+    // RenderTarget::Allocate() releases any prior texture first, and this
+    // only runs on a rare, deliberate user action, never per-frame.
+    shadowTarget_.Allocate(kShadowMapResolution, kShadowMapResolution);
+
     // See settingsSeeded_'s comment on why this only runs once: Init() is
     // also the "Rebuild Systems" entry point, and re-seeding the floor's
     // look on every rebuild would silently discard any floor tuning the
     // user had already dialed in via the panel.
     if (!settingsSeeded_) {
         settingsSeeded_ = true;
-        // Close enough below the fog's typical extent (roughly y in
-        // [-1.5, 6] around fieldCenter_) to read as clearly separate, but
-        // not so far that the camera's default pitch (see App::Init) puts
-        // it below the frame -- at a shallow viewing angle a ground plane
-        // recedes toward the horizon far faster than its raw distance
-        // below the subject suggests.
-        constexpr float kInitialFloorY = -2.2f;
+        // Was -2.2 -- only a ~0.7-unit gap below the fog's typical lowest
+        // excursion (roughly y=-1.5 around fieldCenter_), which turbulence/
+        // shed-particle jitter routinely dipped below, visibly clipping
+        // particles through the floor. -6.0 keeps a comfortable ~4.5-unit
+        // clear gap while staying close enough that the camera's default
+        // pitch (see App::Init) doesn't put it below the frame -- at a
+        // shallow viewing angle a ground plane recedes toward the horizon
+        // far faster than its raw distance below the subject suggests.
+        constexpr float kInitialFloorY = -6.0f;
         floorParams_.center = { shapeSettings_.fieldCenter.x, kInitialFloorY, shapeSettings_.fieldCenter.z };
         floorParams_.shapeSampleY = shapeSettings_.fieldCenter.y;
         floorParams_.lightPoolCenter = floorParams_.center; // pool sits under the overhead light, which is above fieldCenter_
@@ -197,6 +204,67 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     lastTime_ = frame.time; // Draw() is const with no FrameContext of its own -- see the member's comment
 }
 
+void NeonFogVisualizer::PreDraw() {
+    if (!shapeField_ || !shadowTarget_.IsValid()) return;
+
+    // A real top-down render of the actual particle mass -- see
+    // gfx/VoidFloor.h's ShadowMap comment on why this replaces the old
+    // static analytic-shape SDF shadow. Built as raw matrices, not
+    // raylib's BeginMode3D/Camera3D: GpuParticleSystem::Draw/
+    // ParticleRenderer::Draw already take an explicit viewProj +
+    // camera-right/up basis rather than relying on rlgl's matrix stack
+    // (see ParticleRenderer::Draw's signature), so no BeginMode3D is
+    // needed here -- which matters, since App hasn't opened its own
+    // BeginMode3D yet at this point in the frame (see Visualizer::PreDraw's
+    // comment on why this whole pass must run before that and stay
+    // entirely self-contained).
+    Vector3 center = shapeField_->Center();
+    // 1.3x margin so shed/turbulence particles drifting near the shape's
+    // nominal edge still land inside the shadow frustum instead of being
+    // silently clipped out of it.
+    float halfExtent = shapeField_->HalfExtent() * 1.3f;
+    float eyeHeight = halfExtent * 4.0f; // comfortably above the tallest particle excursion
+    Vector3 eye = Vector3Add(center, Vector3{ 0.0f, eyeHeight, 0.0f });
+    Vector3 upHint{ 0.0f, 0.0f, -1.0f };
+
+    Matrix view = MatrixLookAt(eye, center, upHint);
+    Matrix proj = MatrixOrtho(-halfExtent, halfExtent, -halfExtent, halfExtent, 0.1f, eyeHeight * 2.0f);
+    Matrix viewProj = MatrixMultiply(view, proj);
+
+    // Same forward-cross-up-hint basis derivation App::Draw uses for the
+    // main camera, just for a camera looking straight down instead --
+    // resolves to world +X/-Z here, so particle billboards lie flat in
+    // the XZ plane exactly as they'd appear viewed from directly above.
+    Vector3 forward{ 0.0f, -1.0f, 0.0f };
+    Vector3 right = Vector3Normalize(Vector3CrossProduct(forward, upHint));
+    Vector3 up = Vector3CrossProduct(right, forward);
+
+    shadowTarget_.BeginDraw();
+    ClearBackground(Color{ 0, 0, 0, 0 });
+    // Alpha-over compositing (glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA))
+    // saturates to fully opaque after only a handful of overlapping full-
+    // alpha sprites -- correct for the main visual pass, but it means this
+    // density-accumulation pass needs a much smaller per-particle
+    // contribution (see particle_render.frag's uAlphaScale) or the result
+    // clips to a flat, hard-edged silhouette almost everywhere the mass
+    // reaches, reading as a solid geometric blob (a "big box shadow" for
+    // the Box shape) instead of a soft shadow that actually varies with
+    // local density. spriteStyle 0 (clean circular, no wispy noise mask)
+    // -- the mask exists to keep individual sprites from reading as
+    // visible discs in the *lit* view; at 256x256 shadow-map resolution
+    // its high-frequency detail is invisible anyway and just adds patchy
+    // contrast to what should be a smooth density gradient.
+    BeginBlendMode(BLEND_ALPHA);
+    constexpr float kShadowAlphaScale = 0.05f;
+    fog_.Draw(viewProj, right, up, nullptr, 0, lastTime_, /*spriteStyle=*/0, PaletteParams{}, kShadowAlphaScale);
+    EndBlendMode();
+    shadowTarget_.EndDraw();
+
+    shadowMap_.texture = shadowTarget_.Texture();
+    shadowMap_.center = Vector2{ center.x, center.z };
+    shadowMap_.halfExtent = halfExtent;
+}
+
 namespace {
 // Sample-direction grid for the Force Vectors gizmo (see the
 // showForceVectors block below). Shape Bounds no longer needs a shared
@@ -209,11 +277,6 @@ constexpr int kGizmoLonSteps = 8;
 } // namespace
 
 void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
-    // The stage: drawn first as opaque background geometry (default blend,
-    // depth test+write on) so the fog correctly blends over it afterward
-    // (ParticleRenderer::Draw disables depth *write* but keeps the test).
-    floor_.Draw(floorParams_, shapeField_.get());
-
     // Core light occupies slot 0; lightning bolts fill the rest. No
     // overhead-light entry here deliberately -- see the class comment
     // and FogLightingSettings::overheadLightPos's comment: it's not a real
@@ -225,6 +288,10 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // from a position the actual baked field hasn't moved to yet -- the
     // same class of desync Bug 1 was, just reachable through a different
     // path.
+    //
+    // Built *before* the floor draw below (this used to run after it) so
+    // the same array can light the floor too -- see VoidFloor::Draw's
+    // lights/lightCount parameters.
     std::array<LightSample, kMaxParticleLights> lights{};
     lights[0] = LightSample{ shapeField_->Center(), coreLightIntensity_, coreLightColor_ };
     int lightCount = 1;
@@ -236,6 +303,15 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
         lights[static_cast<size_t>(lightCount++)] = spectralLights_[static_cast<size_t>(i)];
     }
     lightCount += lightning_.GatherLights(lights.data() + lightCount, kMaxParticleLights - lightCount);
+
+    // The stage: drawn first as opaque background geometry (default blend,
+    // depth test+write on) so the fog correctly blends over it afterward
+    // (ParticleRenderer::Draw disables depth *write* but keeps the test).
+    // shadowMap_ was rendered this same frame in PreDraw(), before the
+    // main scene target was even bound -- see Visualizer::PreDraw's
+    // comment; lights[] above gives it real particle-color illumination
+    // too, not just the static light-pool hint.
+    floor_.Draw(floorParams_, shapeField_.get(), shadowMap_, lights.data(), lightCount);
 
     // Standard alpha blending, not additive: the fog is meant to read as
     // a gas being lit, not a self-luminous energy cloud -- see the class
@@ -279,6 +355,22 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // comment: those two settings apply to it live, same-frame), so a
     // gizmo built from it structurally cannot drift out of sync the way
     // reading a separate settings mirror could.
+    //
+    // Origin Gizmo is deliberately outside the `shapeField_` guard below --
+    // world (0,0,0) exists whether or not a shape is currently baked, and
+    // it's specifically useful for judging how far Field Center has moved
+    // *from* origin, so it can't depend on shapeField_ at all.
+    if (ctx.debug != nullptr && ctx.debug->showOriginGizmo) {
+        constexpr float kAxisLen = 2.0f;
+        constexpr float kTipRadius = 0.08f;
+        DrawLine3D(Vector3{ 0, 0, 0 }, Vector3{ kAxisLen, 0, 0 }, RED);
+        DrawSphere(Vector3{ kAxisLen, 0, 0 }, kTipRadius, RED);
+        DrawLine3D(Vector3{ 0, 0, 0 }, Vector3{ 0, kAxisLen, 0 }, LIME);
+        DrawSphere(Vector3{ 0, kAxisLen, 0 }, kTipRadius, LIME);
+        DrawLine3D(Vector3{ 0, 0, 0 }, Vector3{ 0, 0, kAxisLen }, BLUE);
+        DrawSphere(Vector3{ 0, 0, kAxisLen }, kTipRadius, BLUE);
+    }
+
     if (ctx.debug != nullptr && shapeField_) {
         // Shape Bounds and Force Vectors both sample shapeField_'s real
         // baked data via SampleWorld() -- the CPU-side cache it reads is
@@ -325,59 +417,76 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
         }
 
         if (ctx.debug->showEmitterBounds) {
+            // Field Center + Position Offset -- see FogEmissionSettings::
+            // positionOffset's comment. Equals `center` (and so visually
+            // overlaps Shape Bounds) whenever Position Offset is still 0,
+            // which is every preset that predates that field.
+            Vector3 emitterCenter = Vector3Add(center, fog_.emission.positionOffset);
             float ext = fog_.attraction.candidateHalfExtent * 2.0f;
-            DrawCubeWiresV(center, Vector3{ ext, ext, ext }, Fade(GREEN, 0.6f));
+            DrawCubeWiresV(emitterCenter, Vector3{ ext, ext, ext }, Fade(GREEN, 0.6f));
+        }
+
+        if (ctx.debug->showVolumeBounds) {
+            // Shell Thickness: the spawn-time-only random offset along the
+            // surface normal (particle_emit.comp) -- these two wireframes
+            // are the actual outer/inner bound newborn particles are
+            // scattered across before the ongoing Shape Attraction force
+            // (which targets the exact surface, offset 0, unless Volume
+            // Depth pulls it inward below) takes over.
+            if (fog_.attraction.shellThickness > 0.0001f) {
+                shapeProvider_->DrawDebugWireframe(*shapeField_, Fade(YELLOW, 0.35f), fog_.attraction.shellThickness);
+                shapeProvider_->DrawDebugWireframe(*shapeField_, Fade(YELLOW, 0.35f), -fog_.attraction.shellThickness);
+            }
+            // Volume Depth: the innermost depth the recruited fraction's
+            // per-particle random target (shape_conform.glsl's targetDist,
+            // uniform in [-volumeDepth, 0]) can reach -- this wireframe is
+            // that depth's floor, not a typical particle's position; most
+            // recruited particles target somewhere between this and the
+            // exact surface (already shown by Shape Bounds).
+            if (fog_.attraction.volumeDepth > 0.0001f) {
+                shapeProvider_->DrawDebugWireframe(*shapeField_, Fade(MAGENTA, 0.35f), -fog_.attraction.volumeDepth);
+            }
         }
 
         if (ctx.debug->showForceVectors) {
-            constexpr float kShellRadius = 4.0f;
-            // Arrow lengths scale with the *actual* current strength
-            // settings (not a fixed idealized length) so the gizmo visibly
-            // grows/shrinks as Gravity Strength/Shape Attraction are tuned
-            // -- a fixed-length arrow that never responds to the setting
-            // it's supposedly showing is worse than no gizmo at all. Scale
-            // factors are just a legible-on-screen mapping, not physically
-            // literal. Shape-attraction is additionally skipped entirely
-            // once morphStrength_ is negligible, matching
-            // ApplyShapeConform's own early-out (shape_conform.glsl) -- no
-            // attraction is actually being applied at that point, so no
-            // arrow should claim otherwise.
-            float gravityArrowLen = Clamp(fog_.force.gravityStrength * 0.4f, 0.0f, 1.5f);
+            // Shell radius scales with the shape's own configured extent
+            // (Shape Grid Half-Extent) instead of a fixed guess, so the
+            // sample shell always sits just outside whatever shape/size is
+            // actually active. Gravity arrows were removed -- see
+            // ui::DebugSettings::showForceVectors's comment.
+            float shellRadius = Clamp(halfExtent * 0.75f, 1.0f, halfExtent);
             bool showAttraction = morphStrength_ > 0.0001f;
+            // Arrow length scales with the *actual* current strength
+            // setting (not a fixed idealized length) so the gizmo visibly
+            // grows/shrinks as Shape Attraction is tuned -- a fixed-length
+            // arrow that never responds to the setting it's supposedly
+            // showing is worse than no gizmo at all. Skipped entirely once
+            // morphStrength_ is negligible, matching ApplyShapeConform's
+            // own early-out (shape_conform.glsl) -- no attraction is
+            // actually being applied at that point, so no arrow should
+            // claim otherwise.
             float attractArrowLen = Clamp(fog_.force.shapeAttraction * morphStrength_ * 0.25f, 0.0f, 1.5f);
-            for (int lat = 1; lat < kGizmoLatSteps; lat++) {
-                float theta = PI * float(lat) / kGizmoLatSteps; // polar angle; skip the exact poles
-                for (int lon = 0; lon < kGizmoLonSteps; lon++) {
-                    float phi = 2.0f * PI * float(lon) / kGizmoLonSteps;
-                    Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
-                    Vector3 samplePos = center + Vector3Scale(dir, kShellRadius);
+            if (showAttraction) {
+                for (int lat = 1; lat < kGizmoLatSteps; lat++) {
+                    float theta = PI * float(lat) / kGizmoLatSteps; // polar angle; skip the exact poles
+                    for (int lon = 0; lon < kGizmoLonSteps; lon++) {
+                        float phi = 2.0f * PI * float(lon) / kGizmoLonSteps;
+                        Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
+                        Vector3 samplePos = center + Vector3Scale(dir, shellRadius);
 
-                    // Gravity: closed-form, mirrors forces.glsl's
-                    // FORCE_GRAVITY_WELL exactly (direction only -- actual
-                    // per-particle magnitude also depends on distance/
-                    // softening and isn't useful to show at gizmo-arrow
-                    // scale; only the overall strength setting is reflected
-                    // in the arrow length above).
-                    if (gravityArrowLen > 0.0001f) {
-                        Vector3 toCenter = Vector3Subtract(center, samplePos);
-                        Vector3 gravityDir = Vector3Normalize(toCenter);
-                        DrawLine3D(samplePos, samplePos + Vector3Scale(gravityDir, gravityArrowLen), SKYBLUE);
-                    }
-
-                    // Shape-attraction direction: points from outside
-                    // toward the surface, mirroring shape_conform.glsl's
-                    // -sign(dist)*gradient. Sampled from the real baked
-                    // field (shapeField_->SampleWorld -- same data
-                    // ApplyShapeConform itself samples), not a hand-copied
-                    // analytic SDF, so this can't drift out of sync with
-                    // whatever shape is actually baked. Assumes Volume
-                    // Depth == 0 (exact-surface targeting) -- with Volume
-                    // Depth > 0 each particle's actual target depth is a
-                    // per-particle random roll (see ApplyShapeConform's
-                    // targetDist) this gizmo can't cheaply replicate
-                    // point-by-point, so it always shows the
-                    // surface-normal case as a known simplification.
-                    if (showAttraction) {
+                        // Points from outside toward the surface, mirroring
+                        // shape_conform.glsl's -sign(dist)*gradient.
+                        // Sampled from the real baked field
+                        // (shapeField_->SampleWorld -- same data
+                        // ApplyShapeConform itself samples), not a
+                        // hand-copied analytic SDF, so this can't drift out
+                        // of sync with whatever shape is actually baked.
+                        // Assumes Volume Depth == 0 (exact-surface
+                        // targeting) -- with Volume Depth > 0 each
+                        // particle's actual target depth is a per-particle
+                        // random roll this gizmo can't cheaply replicate
+                        // point-by-point (see Shell/Volume Bounds above for
+                        // that case instead).
                         ShapeField::FieldSample fs = shapeField_->SampleWorld(samplePos);
                         Vector3 attractDir = Vector3Scale(fs.gradient, fs.distance > 0.0f ? -1.0f : 1.0f);
                         DrawLine3D(samplePos, samplePos + Vector3Scale(attractDir, attractArrowLen), ORANGE);

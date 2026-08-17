@@ -53,13 +53,26 @@ void main() {
     vec3 t = (vec3(id) + 0.5) / vec3(uGridDim); // [0,1] within the grid
     vec3 p = uGridCenter + (t * 2.0 - 1.0) * uGridHalfExtent;
 
-    float d = EvalShape(p);
+    // EvalShape's primitives (sdSphere/sdRoundBox/sdTorus/sdCappedCylinder)
+    // are all written centered at local origin -- sdSphere(p,r) = length(p)-r
+    // is only a sphere *at world (0,0,0)* if p is world position. Evaluating
+    // at the raw world position `p` (as this used to) therefore baked every
+    // shape permanently anchored at world origin, completely ignoring
+    // uGridCenter -- only the grid/sampling window moved with Field Center,
+    // never the shape itself. uGridCenter must be subtracted first so the
+    // shape is actually centered where the grid (and everything that reads
+    // it -- the emit candidate box, the debug wireframe, the ShapeConform
+    // force) agrees it is; see shape_field_sample.glsl's inverse of this
+    // same transform, which SampleWorld/SampleShapeField already got right.
+    vec3 localP = p - uGridCenter;
+
+    float d = EvalShape(localP);
 
     const float e = 0.05;
     vec3 grad = normalize(vec3(
-        EvalShape(p + vec3(e, 0, 0)) - EvalShape(p - vec3(e, 0, 0)),
-        EvalShape(p + vec3(0, e, 0)) - EvalShape(p - vec3(0, e, 0)),
-        EvalShape(p + vec3(0, 0, e)) - EvalShape(p - vec3(0, 0, e))
+        EvalShape(localP + vec3(e, 0, 0)) - EvalShape(localP - vec3(e, 0, 0)),
+        EvalShape(localP + vec3(0, e, 0)) - EvalShape(localP - vec3(0, e, 0)),
+        EvalShape(localP + vec3(0, 0, e)) - EvalShape(localP - vec3(0, 0, e))
     ));
 
     int index = id.x + id.y * uGridDim.x + id.z * uGridDim.x * uGridDim.y;

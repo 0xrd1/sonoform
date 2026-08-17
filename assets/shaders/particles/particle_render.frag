@@ -13,6 +13,23 @@ uniform float uTime;
 // styled wispy look described below. See ui::DebugSettings::disableSpriteNoise
 // and GpuParticleSystem::Draw's spriteStyle parameter.
 uniform int uSpriteStyle;
+// 1.0 (default) = normal rendering, an exact no-op. Anything smaller scales
+// only the *final written* alpha, not the discard test below -- see
+// NeonFogVisualizer::PreDraw's top-down shadow-map pass, the one caller
+// that ever sets this to something else. Standard alpha-over compositing
+// (glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), see rlgl.h's
+// RL_BLEND_ALPHA) saturates to fully opaque after only a handful of
+// overlapping full-alpha sprites -- fine for the main visual pass (that's
+// the correct look for dense lit fog), but it means a density-accumulation
+// pass reusing this same shader unmodified would saturate to a flat, hard-
+// edged silhouette almost everywhere the particle mass reaches, reading as
+// a solid geometric blob rather than a soft shadow that varies with actual
+// local density. Scaling every particle's contribution down here (the
+// shadow pass uses ~0.05) means many more overlapping particles are needed
+// to reach full opacity, so the accumulated result actually reflects how
+// thick the fog is at each point instead of clipping to solid almost
+// immediately.
+uniform float uAlphaScale;
 
 void main() {
     // Analytic soft-round base falloff -- equivalent to the old CPU path's
@@ -51,6 +68,9 @@ void main() {
     // Additive blending (glBlendFunc(GL_SRC_ALPHA, GL_ONE), see
     // rlgl.h's RL_BLEND_ADDITIVE) already multiplies rgb by alpha in the
     // fixed-function blend stage -- do not premultiply here too, or
-    // faint particles dim by alpha^2 instead of alpha.
-    fragColor = vec4(vColor.rgb, vColor.a * alpha);
+    // faint particles dim by alpha^2 instead of alpha. uAlphaScale is
+    // applied last, after the discard test above, so it changes how
+    // *opaque* a sprite reads without shrinking its visible radius --
+    // see its own comment.
+    fragColor = vec4(vColor.rgb, vColor.a * alpha * uAlphaScale);
 }

@@ -53,7 +53,7 @@ public:
     // not exposed here; add parameters if a future emitter needs them.
     void Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               const LightSample* lights, int lightCount, float time, int spriteStyle,
-              const PaletteParams& palette = PaletteParams{}) const;
+              const PaletteParams& palette = PaletteParams{}, float alphaScale = 1.0f) const;
 
     int AliveCountApprox() const { return system_ ? system_->AliveCountApprox() : 0; }
 
@@ -113,4 +113,11 @@ private:
     float bassSmoothed_ = 0.0f;
     float midSmoothed_ = 0.0f;
     float excitement_ = 0.0f;
+
+    // Independent, much longer low-pass over EnergyLevel() -- see
+    // FogAudioSettings::sectionSmoothing's comment. Drives
+    // dragAudioScale/shapeAttractionAudioScale: a song-section "mood"
+    // envelope, distinct from excitement_ above (which uses the faster
+    // motionSmoothing).
+    float sectionEnergy_ = 0.0f;
 };

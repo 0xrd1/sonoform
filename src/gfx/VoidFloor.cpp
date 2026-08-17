@@ -3,6 +3,7 @@
 #include "ShapeField.h"
 #include "raymath.h"
 #include "rlgl.h"
+#include <array>
 
 void VoidFloor::Init(ShaderLibrary& shaders) {
     // Re-entrant: the settings panel's "Rebuild Systems" action re-runs the
@@ -43,6 +44,15 @@ void VoidFloor::Init(ShaderLibrary& shaders) {
     locLightPoolCenter_ = GetShaderLocation(shader_, "uLightPoolCenter");
     locLightPoolRadius_ = GetShaderLocation(shader_, "uLightPoolRadius");
     locLightPoolStrength_ = GetShaderLocation(shader_, "uLightPoolStrength");
+
+    locHasShadowMap_ = GetShaderLocation(shader_, "uHasShadowMap");
+    locShadowMapTex_ = GetShaderLocation(shader_, "uShadowMapTex");
+    locShadowMapCenter_ = GetShaderLocation(shader_, "uShadowMapCenter");
+    locShadowMapHalfExtent_ = GetShaderLocation(shader_, "uShadowMapHalfExtent");
+
+    locLightPositions_ = GetShaderLocation(shader_, "uLightPositions");
+    locLightColors_ = GetShaderLocation(shader_, "uLightColors");
+    locLightCount_ = GetShaderLocation(shader_, "uLightCount");
 }
 
 VoidFloor::~VoidFloor() {
@@ -61,7 +71,8 @@ Vector3 ColorToVec3(Color c) {
 }
 }
 
-void VoidFloor::Draw(const Params& p, const ShapeField* shapeField) const {
+void VoidFloor::Draw(const Params& p, const ShapeField* shapeField, const ShadowMap& shadowMap,
+                      const LightSample* lights, int lightCount) const {
     rlEnableShader(shader_.id);
 
     // Binds the ShapeField's SSBO + grid-transform uniforms onto this now-
@@ -90,6 +101,40 @@ void VoidFloor::Draw(const Params& p, const ShapeField* shapeField) const {
     if (locLightPoolCenter_ != -1) SetShaderValue(shader_, locLightPoolCenter_, &lightPoolCenter, SHADER_UNIFORM_VEC3);
     if (locLightPoolRadius_ != -1) SetShaderValue(shader_, locLightPoolRadius_, &p.lightPoolRadius, SHADER_UNIFORM_FLOAT);
     if (locLightPoolStrength_ != -1) SetShaderValue(shader_, locLightPoolStrength_, &p.lightPoolStrength, SHADER_UNIFORM_FLOAT);
+
+    // Real top-down particle shadow (see ShadowMap's comment) -- falls
+    // back to the SDF-proximity path in void_floor.frag whenever no valid
+    // texture is bound (id == 0), e.g. before NeonFogVisualizer::PreDraw
+    // has ever run once.
+    int hasShadowMap = (shadowMap.texture.id != 0) ? 1 : 0;
+    if (locHasShadowMap_ != -1) SetShaderValue(shader_, locHasShadowMap_, &hasShadowMap, SHADER_UNIFORM_INT);
+    if (hasShadowMap != 0) {
+        if (locShadowMapTex_ != -1) SetShaderValueTexture(shader_, locShadowMapTex_, shadowMap.texture);
+        if (locShadowMapCenter_ != -1) SetShaderValue(shader_, locShadowMapCenter_, &shadowMap.center, SHADER_UNIFORM_VEC2);
+        if (locShadowMapHalfExtent_ != -1) SetShaderValue(shader_, locShadowMapHalfExtent_, &shadowMap.halfExtent, SHADER_UNIFORM_FLOAT);
+    }
+
+    // Same light array/falloff particles themselves are lit by -- see
+    // particle_render.vert's identical uLightPositions/uLightColors/
+    // uLightCount + light-boost loop, which this mirrors in
+    // void_floor.frag. Always set uLightCount explicitly (never gated
+    // behind "if lightCount > 0"): this shader program is the floor's
+    // only user today, but the same "don't leak stale state across draw
+    // calls on a shared program" reasoning ParticleRenderer::Draw
+    // documents applies the moment that changes.
+    int clampedCount = lightCount < 0 ? 0 : (lightCount > kMaxParticleLights ? kMaxParticleLights : lightCount);
+    if (locLightCount_ != -1) SetShaderValue(shader_, locLightCount_, &clampedCount, SHADER_UNIFORM_INT);
+    if (clampedCount > 0 && locLightPositions_ != -1 && locLightColors_ != -1) {
+        std::array<Vector4, kMaxParticleLights> positions{};
+        std::array<Vector4, kMaxParticleLights> colors{};
+        for (int i = 0; i < clampedCount; i++) {
+            const LightSample& l = lights[i];
+            positions[static_cast<size_t>(i)] = { l.position.x, l.position.y, l.position.z, l.intensity };
+            colors[static_cast<size_t>(i)] = { l.color.r / 255.0f, l.color.g / 255.0f, l.color.b / 255.0f, 0.0f };
+        }
+        SetShaderValueV(shader_, locLightPositions_, positions.data(), SHADER_UNIFORM_VEC4, clampedCount);
+        SetShaderValueV(shader_, locLightColors_, colors.data(), SHADER_UNIFORM_VEC4, clampedCount);
+    }
 
     Matrix transform = MatrixMultiply(MatrixScale(p.size, 1.0f, p.size),
                                        MatrixTranslate(p.center.x, p.center.y, p.center.z));

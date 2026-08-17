@@ -137,7 +137,8 @@ public:
               int fadeMode = 0, float sizeScale = 1.0f,
               const LightSample* lights = nullptr, int lightCount = 0,
               float time = 0.0f, int spriteStyle = 1,
-              const PaletteParams& palette = PaletteParams{}) const;
+              const PaletteParams& palette = PaletteParams{},
+              float alphaScale = 1.0f) const;
 
     int Capacity() const { return capacity_; }
 

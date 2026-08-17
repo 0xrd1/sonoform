@@ -3,6 +3,7 @@
 #include "ShapeField.h"
 #include "ParamVisitor.h"
 #include "AudioAnalyzer.h"
+#include "raymath.h"
 #include <algorithm>
 
 void ShapeFogEmitter::Init(ShaderLibrary& shaders, ParticleRenderer& renderer, ShapeField& field) {
@@ -18,7 +19,7 @@ void ShapeFogEmitter::Init(ShaderLibrary& shaders, ParticleRenderer& renderer, S
     dragForceIndex_ = system_->AddForce(gpu_force::Drag(force.dragCoefficient));
     shapeConformForceIndex_ = system_->AddForce(
         gpu_force::ShapeConform(force.shapeAttraction, force.shapeCurl, 0.0f, attraction.recruitFraction,
-                                 attraction.volumeDepth, force.flowNoiseScale));
+                                 attraction.volumeDepth, force.flowNoiseScale, attraction.captureRange));
 
     spawnAccumulator_ = 0.0f;
 }
@@ -37,12 +38,19 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
     // toward the raw band value at audio.motionSmoothing's rate) so the
     // forces they drive breathe with the track instead of jittering every
     // FFT update; Treble stays instantaneous, the deliberately fast
-    // "sparkle" signal. None of this ever touches shapeAttraction/
-    // morphStrength/recruitFraction -- the panel/driver values for those
-    // are passed through completely un-modulated below.
+    // "sparkle" signal. morphStrength/recruitFraction are still passed
+    // through completely un-modulated -- see ShapeSettings::morphForce's
+    // own comment on why shape *morphing* stays independent of audio.
+    // Drag/Shape Attraction are the one exception (dragAudioScale/
+    // shapeAttractionAudioScale, both opt-in/0-default -- see
+    // FogAudioSettings' class comment) and are driven by sectionEnergy_
+    // below, a second, much slower envelope than bassSmoothed_/etc.
     float effectiveGravity = force.gravityStrength;
     float effectiveCurl = force.shapeCurl;
     float effectiveTurbulence = force.turbulenceStrength;
+    float effectiveTurbulenceScale = force.turbulenceScale;
+    float effectiveDrag = force.dragCoefficient;
+    float effectiveAttraction = force.shapeAttraction;
     if (audio.reactive) {
         float smoothing = std::max(audio.motionSmoothing, 0.01f);
         float lag = std::min(1.0f, dt / smoothing);
@@ -53,14 +61,34 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
         effectiveGravity += bassSmoothed_ * audio.bassGravityScale;
         effectiveCurl += midSmoothed_ * audio.midCurlScale;
         effectiveTurbulence += excitement_ * audio.excitementTurbulenceScale + audioAnalyzer.Treble() * audio.trebleTurbulenceScale;
+        effectiveTurbulenceScale = std::clamp(effectiveTurbulenceScale + audioAnalyzer.FluxLevel() * force.turbulenceScaleAudioScale, 0.01f, 1.0f);
+
+        // Section "mood" envelope -- see FogAudioSettings::sectionSmoothing's
+        // comment for why this is independent of (and much slower than)
+        // excitement_ above. Both terms below subtract as sectionEnergy_
+        // rises: loud sections loosen (lower drag, weaker attraction),
+        // quiet sections settle back toward the base sliders.
+        float sectionLag = std::min(1.0f, dt / std::max(audio.sectionSmoothing, 0.1f));
+        sectionEnergy_ += (audioAnalyzer.EnergyLevel() - sectionEnergy_) * sectionLag;
+
+        // Hard floor, not cosmetic: forces.glsl applies drag as
+        // `vel -= vel * coefficient * dt`, so a coefficient at or below 0
+        // turns damping into unbounded positive feedback (velocity grows
+        // every frame instead of settling).
+        effectiveDrag = std::max(0.05f, force.dragCoefficient - sectionEnergy_ * audio.dragAudioScale);
+        // Floored at 15% of the base value, not 0 -- the silhouette can
+        // loosen dramatically on a loud section but must never fully lose
+        // its hold, honoring FogAudioSettings' "always holds" guarantee.
+        effectiveAttraction = std::max(force.shapeAttraction * 0.15f,
+                                        force.shapeAttraction - sectionEnergy_ * audio.shapeAttractionAudioScale);
     }
 
     system_->SetForce(shapeConformForceIndex_,
-        gpu_force::ShapeConform(force.shapeAttraction, effectiveCurl, morphStrength, attraction.recruitFraction,
-                                 attraction.volumeDepth, force.flowNoiseScale));
+        gpu_force::ShapeConform(effectiveAttraction, effectiveCurl, morphStrength, attraction.recruitFraction,
+                                 attraction.volumeDepth, force.flowNoiseScale, attraction.captureRange));
     system_->SetForce(gravityForceIndex_, gpu_force::GravityWell(field.Center(), effectiveGravity, force.gravitySoftening));
-    system_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(effectiveTurbulence, force.turbulenceScale));
-    system_->SetForce(dragForceIndex_, gpu_force::Drag(force.dragCoefficient));
+    system_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(effectiveTurbulence, effectiveTurbulenceScale));
+    system_->SetForce(dragForceIndex_, gpu_force::Drag(effectiveDrag));
 
     // Cheap CPU-side (two field writes -- see GpuParticleSystem::SetShading),
     // so re-calling every frame is fine and is what makes Lighting's
@@ -92,10 +120,16 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
         spawnAccumulator_ -= static_cast<float>(spawnCount);
 
         GpuEmitParams ep;
-        ep.mode = GpuEmitMode::ShapeSurface;
-        ep.position = field.Center();
+        // See FogEmissionSettings::emitMode's comment: 0 (default) keeps
+        // today's exact behavior (every particle pre-projected onto the
+        // shape's surface); 1 spawns genuinely free ballistic particles
+        // that only reach the shape via Shape Attraction (or their own
+        // velocity), which Shape Surface mode structurally cannot do since
+        // it always projects at birth.
+        ep.mode = (emission.emitMode == 1) ? GpuEmitMode::Box : GpuEmitMode::ShapeSurface;
+        ep.position = Vector3Add(field.Center(), emission.positionOffset);
         ep.positionJitter = { attraction.candidateHalfExtent, attraction.candidateHalfExtent, attraction.candidateHalfExtent };
-        ep.shellThickness = attraction.shellThickness;
+        ep.shellThickness = attraction.shellThickness; // Shape Surface mode only; harmless unused value in Free mode
         ep.velocity = emission.velocity;
         ep.velocityJitter = emission.velocityJitter;
 
@@ -119,7 +153,7 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
 
 void ShapeFogEmitter::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                             const LightSample* lights, int lightCount, float time, int spriteStyle,
-                            const PaletteParams& palette) const {
+                            const PaletteParams& palette, float alphaScale) const {
     if (!system_) return;
     // fadeMode 2 (particle_render.vert's two-sided fade, in over the first
     // ~25% of life and out over the final ~17%) instead of 1 (instant-
@@ -127,7 +161,7 @@ void ShapeFogEmitter::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 
     // snapped to full brightness the instant it existed, which read as a
     // visible "pop in" no matter how the lifecycle/spawn-rate was tuned.
     system_->Draw(viewProj, cameraRight, cameraUp, /*fadeMode=*/2, /*sizeScale=*/1.0f,
-                  lights, lightCount, time, spriteStyle, palette);
+                  lights, lightCount, time, spriteStyle, palette, alphaScale);
 }
 
 void ShapeFogEmitter::EmitImpactBurst(Vector3 center) {

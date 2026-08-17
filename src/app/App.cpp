@@ -34,9 +34,14 @@ bool HasSupportedAudioExt(const fs::path& p) {
 }
 
 bool App::Init(const std::string& audioPathArg) {
+    // FLAG_VSYNC_HINT here is just an initial window-creation hint --
+    // Run()'s very first ApplyPerformanceSettings() call corrects both
+    // vsync and target FPS to whatever ui::PerformanceSettings' actual
+    // defaults are (vsync off, uncapped) before the first frame draws, so
+    // no SetTargetFPS() placeholder is needed here -- see that function's
+    // comment.
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1920, 1080, "Particle Audio Visualizer");
-    SetTargetFPS(60);
 
     // The requested 1920x1080 is a target aspect ratio, not a guarantee --
     // on a 1080p (or smaller) desktop that would exactly fill or exceed the
@@ -280,7 +285,15 @@ void App::ApplyAudioSettings() {
 }
 
 void App::ApplyPerformanceSettings() {
-    if (perfSettings_.vsync != lastVsync_) {
+    // `|| !perfSettingsApplied_` on both conditions: without it, the very
+    // first call here (perfSettings_ still at its just-constructed
+    // defaults) sees perfSettings_.vsync == lastVsync_ and
+    // perfSettings_.targetFps == lastTargetFps_ -- both member-initialized
+    // from perfSettings_'s own defaults -- so neither branch ever fires,
+    // and the SetTargetFPS(60)/default-vsync state InitWindow() set up
+    // silently never gets corrected to the real (uncapped, no-vsync)
+    // defaults until the user manually moves a slider once.
+    if (perfSettings_.vsync != lastVsync_ || !perfSettingsApplied_) {
         // raylib forwards FLAG_VSYNC_HINT's SetWindowState/ClearWindowState
         // to glfwSwapInterval(1)/(0) at runtime on the desktop/GLFW backend
         // this project targets -- no window recreation needed.
@@ -288,10 +301,11 @@ void App::ApplyPerformanceSettings() {
         else ClearWindowState(FLAG_VSYNC_HINT);
         lastVsync_ = perfSettings_.vsync;
     }
-    if (perfSettings_.targetFps != lastTargetFps_) {
+    if (perfSettings_.targetFps != lastTargetFps_ || !perfSettingsApplied_) {
         SetTargetFPS(perfSettings_.targetFps); // raylib treats 0 as uncapped
         lastTargetFps_ = perfSettings_.targetFps;
     }
+    perfSettingsApplied_ = true;
 }
 
 void App::Run() {
@@ -460,6 +474,14 @@ void App::UpdateCameraOrbit(float dt) {
 }
 
 void App::Draw() {
+    // Any off-screen render-to-texture work a visualizer needs on its own
+    // framebuffer (e.g. NeonFogVisualizer's top-down particle shadow map)
+    // must happen before PostProcess::BeginScene() below -- see
+    // Visualizer::PreDraw's comment on why raylib's BeginTextureMode/
+    // EndTextureMode can't nest inside it once the main scene target is
+    // already bound.
+    visualizers_.PreDraw();
+
     // The 3D scene renders into an offscreen target first (PostProcess::
     // BeginScene/EndScene) so bloom can extract and blur its bright areas
     // before the final composite goes to the backbuffer -- see

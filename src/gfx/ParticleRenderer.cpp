@@ -18,6 +18,7 @@ ParticleRenderer::ParticleRenderer(ShaderLibrary& shaders) {
     locLightCount_ = GetShaderLocation(shader_, "uLightCount");
     locTime_ = GetShaderLocation(shader_, "uTime");
     locSpriteStyle_ = GetShaderLocation(shader_, "uSpriteStyle");
+    locAlphaScale_ = GetShaderLocation(shader_, "uAlphaScale");
 
     locPaletteMode_ = GetShaderLocation(shader_, "uPaletteMode");
     locPaletteCenter_ = GetShaderLocation(shader_, "uPaletteCenter");
@@ -42,7 +43,7 @@ ParticleRenderer::~ParticleRenderer() {
 
 void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                              int fadeMode, float sizeScale, const LightSample* lights, int lightCount,
-                             float time, int spriteStyle, const PaletteParams& palette) const {
+                             float time, int spriteStyle, const PaletteParams& palette, float alphaScale) const {
     if (instanceCount <= 0) return;
 
     rlEnableShader(shader_.id);
@@ -54,6 +55,12 @@ void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 c
     if (locSizeScale_ != -1) SetShaderValue(shader_, locSizeScale_, &sizeScale, SHADER_UNIFORM_FLOAT);
     if (locTime_ != -1) SetShaderValue(shader_, locTime_, &time, SHADER_UNIFORM_FLOAT);
     if (locSpriteStyle_ != -1) SetShaderValue(shader_, locSpriteStyle_, &spriteStyle, SHADER_UNIFORM_INT);
+    // Always set explicitly, never gated -- GLSL uniforms default to 0 if
+    // never written, which for this one would make every particle
+    // invisible the first time this shared program is used, and leak a
+    // stale scale into the next draw call otherwise -- same reasoning as
+    // uLightCount/uPaletteMode below.
+    if (locAlphaScale_ != -1) SetShaderValue(shader_, locAlphaScale_, &alphaScale, SHADER_UNIFORM_FLOAT);
 
     // Always set explicitly (not gated behind "if palette.mode != Off"):
     // this program is shared across every particle system's draw call

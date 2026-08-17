@@ -82,6 +82,51 @@ void VisitAll(PanelState& state, IParamVisitor& v) {
     v.EndGroup();
 }
 
+// A full textual snapshot of everything VisitAll covers *except Camera* --
+// literally what Save As would write to disk (minus that one group), via
+// the same SettingsWriter the actual save path uses (see SettingsIO.h),
+// just kept in memory instead. Comparing this string against what was
+// cached at the last successful Load/Save is the "active preset" badge's
+// whole mechanism (see s_loadedSnapshot below): cheap and correct without
+// any new hook on IParamVisitor -- if a value differs from what's on disk,
+// the round-trip text differs too.
+//
+// Camera is deliberately excluded here (though it's still fully part of
+// VisitAll/the real save-load round-trip -- Save As still captures it):
+// CameraSettings::yaw advances every single frame while Auto-Rotate is on
+// (the default), so including it would flip this badge to "Custom" within
+// one frame of loading *any* preset, regardless of whether the user
+// touched anything -- camera position is live view state that happens to
+// be saved as a starting point, not part of what makes a preset "the
+// same look".
+std::string SnapshotOf(PanelState& state) {
+    SettingsWriter writer;
+    writer.BeginGroup("Post");
+    state.post->Visit(writer);
+    writer.EndGroup();
+    writer.BeginGroup(state.visualizers->CurrentName());
+    state.visualizers->VisitCurrentSettings(writer);
+    writer.EndGroup();
+    return writer.Text();
+}
+
+// "Which preset (if any) matches every currently-visited value" -- module-
+// level statics, same pattern kPresetsDir/nameBuf already use in this file
+// (PanelState is rebuilt fresh every frame by App::DrawUi, so this can't
+// live there). Updated by MarkLoaded() below on every successful Load/
+// Load Default/Save As/Save As Default; DrawDebugPanel seeds a baseline
+// lazily on its first call if nothing else has by then (a totally fresh
+// run with no default.ini yet).
+std::string s_loadedPresetName;
+std::string s_loadedSnapshot;
+bool s_presetStateInitialized = false;
+
+void MarkLoaded(PanelState& state, const std::string& name) {
+    s_loadedPresetName = name;
+    s_loadedSnapshot = SnapshotOf(state);
+    s_presetStateInitialized = true;
+}
+
 } // namespace
 
 void Setup() {
@@ -103,6 +148,15 @@ void Setup() {
     // dockspace. ImGuiConfigFlags_ViewportsEnable must never be set: it
     // needs an ImGui platform backend able to create additional OS windows,
     // and rlImGui implements none (raylib owns the single GLFW window).
+
+    // ImGuiPanelVisitor's widgets (see ImGuiPanel.cpp) check
+    // IsItemHovered(ImGuiHoveredFlags_DelayNormal) on their label text
+    // specifically, not the slider/checkbox/etc. control itself -- this is
+    // the delay that flag waits out before returning true. Set once, here,
+    // rather than left at ImGui's own default (~0.4s): a full second is
+    // what actually reads as "hovering to read a tooltip", not "hovering
+    // in passing on the way to the next field."
+    ImGui::GetStyle().HoverDelayNormal = 1.0f;
 }
 
 void Shutdown() { rlImGuiShutdown(); }
@@ -129,7 +183,37 @@ void DrawDebugPanel(PanelState& state) {
 
     ImGui::Text("FPS: %d   Particles: %d", GetFPS(), state.particleCount);
     ImGui::Text("Track: %s", state.trackLabel);
+
+    // "Which preset is this" -- see SnapshotOf()/s_loadedSnapshot's
+    // comment. Recomputed every frame (a full ~150-field VisitAll pass,
+    // already declared "free next to 320k particles" elsewhere in this
+    // codebase); lazily seeds a baseline on the very first call so the
+    // compiled-in hardcoded defaults don't show as "Custom" for no reason
+    // on a totally fresh run with no default.ini (LoadDefaultSettings, if
+    // it succeeded, already seeded this before the first DrawDebugPanel
+    // call -- see App::Init).
+    std::string currentSnapshot = SnapshotOf(state);
+    if (!s_presetStateInitialized) {
+        s_loadedPresetName = "Default";
+        s_loadedSnapshot = currentSnapshot;
+        s_presetStateInitialized = true;
+    }
+    ImGui::Text("Preset: %s", currentSnapshot == s_loadedSnapshot ? s_loadedPresetName.c_str() : "Custom");
+
     ImGui::TextDisabled("Ctrl+Click or double-click any slider to type an exact value");
+
+    // App-wide, not visualizer-specific (a machine characteristic, not
+    // part of "the look" -- see PerformanceSettings' own comment on why
+    // it's excluded from VisitAll/the preset round-trip below), so it's
+    // drawn up here alongside Camera/Post's conceptual tier rather than
+    // nested after the current visualizer's own settings.
+    if (state.performance != nullptr) {
+        ImGui::Separator();
+        ImGuiPanelVisitor perfPanel;
+        perfPanel.BeginGroup("Performance");
+        state.performance->Visit(perfPanel);
+        perfPanel.EndGroup();
+    }
 
     if (state.paused != nullptr) {
         bool wasPaused = *state.paused;
@@ -206,15 +290,6 @@ void DrawDebugPanel(PanelState& state) {
         // to the widgets it's about to draw.
         ImGuiPanelVisitor panel;
         VisitAll(state, panel);
-
-        // Not part of VisitAll/the preset round-trip -- see
-        // PerformanceSettings' own comment on why (a machine
-        // characteristic, not part of "the look").
-        if (state.performance != nullptr) {
-            panel.BeginGroup("Performance");
-            state.performance->Visit(panel);
-            panel.EndGroup();
-        }
     }
 
     ImGui::Separator();
@@ -240,15 +315,15 @@ void DrawDebugPanel(PanelState& state) {
 
     if (ImGui::Button("Save As")) {
         std::string path = PresetsDir() + "/" + nameBuf + ".ini";
-        SaveSettings(path, [&](IParamVisitor& v) { VisitAll(state, v); });
+        if (SaveSettings(path, [&](IParamVisitor& v) { VisitAll(state, v); })) MarkLoaded(state, nameBuf);
     }
     ImGui::SameLine();
     if (ImGui::Button("Save As Default")) {
-        SaveSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
+        if (SaveSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); })) MarkLoaded(state, "Default");
     }
     ImGui::SameLine();
     if (ImGui::Button("Load Default")) {
-        LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
+        if (LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); })) MarkLoaded(state, "Default");
     }
 
     for (const std::string& name : ListPresets(PresetsDir())) {
@@ -256,7 +331,7 @@ void DrawDebugPanel(PanelState& state) {
         ImGui::BulletText("%s", name.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Load")) {
-            LoadSettings(PresetsDir() + "/" + name + ".ini", [&](IParamVisitor& v) { VisitAll(state, v); });
+            if (LoadSettings(PresetsDir() + "/" + name + ".ini", [&](IParamVisitor& v) { VisitAll(state, v); })) MarkLoaded(state, name);
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Delete")) {
@@ -305,7 +380,12 @@ void DrawDebugWindow(PanelState& state) {
 
 bool LoadDefaultSettings(PanelState& state) {
     if (state.visualizers == nullptr || state.camera == nullptr || state.post == nullptr) return false;
-    return LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
+    bool loaded = LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
+    // Seeds the "active preset" badge (see MarkLoaded's comment) before
+    // DrawDebugPanel's first call, so a successful startup load shows
+    // "Default" immediately instead of one frame of "Custom".
+    if (loaded) MarkLoaded(state, "Default");
+    return loaded;
 }
 
 } // namespace ui

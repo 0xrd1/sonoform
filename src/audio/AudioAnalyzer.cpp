@@ -104,6 +104,10 @@ float AudioAnalyzer::EnergyLevel() const {
     std::lock_guard<std::mutex> lock(snapshotMutex_);
     return snapshot_.energyLevel;
 }
+float AudioAnalyzer::FluxLevel() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.fluxLevel;
+}
 
 void AudioAnalyzer::Update() {
     std::array<float, kFFTSize> samples{};
@@ -133,6 +137,18 @@ void AudioAnalyzer::Update() {
         // Exponential smoothing for a less jittery display.
         smoothedSpectrum_[i] += (mag - smoothedSpectrum_[i]) * 0.5f;
     }
+
+    // Spectral flux: half-wave rectified frame-to-frame increase, summed
+    // across every bin -- see FluxLevel()'s header comment. Computed off
+    // smoothedSpectrum_ (not the raw per-call spectrum_) so this tracks
+    // real onsets, not FFT bin-to-bin jitter. prevSpectrum_ is this
+    // array's value as of the *previous* Update() call -- snapshotted
+    // right after, so next call diffs against what was just used here.
+    float rawFlux = 0.0f;
+    for (int i = 0; i < kSpectrumBins; i++) {
+        rawFlux += std::max(0.0f, smoothedSpectrum_[i] - prevSpectrum_[i]);
+    }
+    prevSpectrum_ = smoothedSpectrum_;
 
     // Log-spaced bars from ~30 Hz to Nyquist, averaging bins within
     // each bar's frequency range. Log spacing matches how the ear
@@ -221,6 +237,11 @@ void AudioAnalyzer::Update() {
     float midLevel = updateLevel(mid, midPeak_);
     float trebleLevel = updateLevel(treble, treblePeak_);
     float energyLevel = updateLevel(energy, energyPeak_);
+    // rawFlux's absolute magnitude (a sum over kSpectrumBins positive
+    // diffs) has nothing to do with bass/mid/treble/energy's -- doesn't
+    // matter, updateLevel normalizes against its own independent rolling
+    // peak (fluxPeak_), so the same lambda works unchanged.
+    float fluxLevel = updateLevel(rawFlux, fluxPeak_);
 
     beatCooldown_ = std::max(0.0f, beatCooldown_ - dt);
 
@@ -245,6 +266,7 @@ void AudioAnalyzer::Update() {
         snapshot_.energy = energy;
         snapshot_.beatTriggered = beatTriggered;
         snapshot_.beatIntensity = beatIntensity;
+        snapshot_.fluxLevel = fluxLevel;
         snapshot_.bassLevel = bassLevel;
         snapshot_.midLevel = midLevel;
         snapshot_.trebleLevel = trebleLevel;

@@ -9,6 +9,7 @@
 #include "AudioAnalyzer.h"
 #include "VoidFloor.h"
 #include "EngineSettings.h"
+#include "RenderTarget.h"
 
 // A dense fog volume lit from within, rather than self-luminous. Real
 // smoke/fog VFX is rendered with a neutral (near-grey) particle albedo
@@ -56,11 +57,14 @@
 // (particle_render.frag) that keeps it reading as a lit volume rather than
 // a field of flat, uniform discs.
 // Palette is cool blue/white (Tron Legacy), not the earlier violet.
-// Audio drives lighting only: the core light's color/intensity and
-// lightning both pulse with musical swells. Shape attraction is
-// deliberately independent of audio -- morphStrength_ eases toward
-// shapeSettings_.morphForce, a standalone driver (user-tunable via '-'/'='
-// or the settings panel, see AdjustPrimary) that has nothing to do with
+// Audio drives lighting (core color/intensity, lightning), color
+// (FogColorSettings' spectral lights/palette), and -- opt-in, both
+// default 0 -- Drag/Shape Attraction (FogAudioSettings::dragAudioScale/
+// shapeAttractionAudioScale, see its class comment) as a slow per-section
+// "mood" driver. Shape *morphing* stays deliberately independent of audio
+// regardless -- morphStrength_ eases toward shapeSettings_.morphForce, a
+// standalone driver (user-tunable via '-'/'=' or the settings panel, see
+// AdjustPrimary) that has nothing to do with
 // the music, so the shape-conform pipeline can be proven out (and later
 // driven by other external forces, e.g. wind/turbulence) without audio in
 // the loop.
@@ -73,6 +77,7 @@ class NeonFogVisualizer : public Visualizer {
 public:
     void Init(ShaderLibrary& shaders, ParticleRenderer& renderer) override;
     void Update(const FrameContext& frame) override;
+    void PreDraw() override;
     void Draw(const RenderContext& ctx) const override;
     const char* Name() const override { return "Neon Fog"; }
     int ParticleCount() const override { return fog_.AliveCountApprox(); }
@@ -154,4 +159,19 @@ private:
     // colorSettings_'s static fields directly.
     float paletteHueA_ = 0.0f;
     float paletteHueB_ = 0.0f;
+
+    // Real top-down particle shadow -- see PreDraw()'s definition and
+    // gfx/VoidFloor.h's ShadowMap comment. Allocated once in Init();
+    // rendered into fresh every frame in PreDraw(), before the main
+    // scene's own render target is active (see Visualizer::PreDraw's
+    // comment on why that ordering is load-bearing, not stylistic).
+    // 256x256: the floor shadow is a soft, low-frequency feature, so this
+    // is a small fraction of the main pass's fill cost -- see PreDraw()'s
+    // perf comment for the actual cost driver (vertex count, not this).
+    static constexpr int kShadowMapResolution = 256;
+    RenderTarget shadowTarget_;
+    // What PreDraw() actually rendered this frame -- Draw() (const) reads
+    // this to build VoidFloor::ShadowMap rather than recomputing it, so
+    // the two can never disagree about what the texture covers.
+    VoidFloor::ShadowMap shadowMap_;
 };

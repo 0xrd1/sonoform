@@ -38,6 +38,38 @@ struct FogEmissionSettings {
     // Recruit Fraction/life tuning.
     float spawnRate = 55000.0f;
 
+    // Where new particles are actually born, in world space: field.Center()
+    // (the shape/gravity/lighting target -- see ShapeSettings::fieldCenter)
+    // plus this offset. 0 (the default) is byte-for-byte today's behavior --
+    // every preset predating this field spawns exactly centered on the
+    // shape, same as before. Nonzero lets the *spawner* sit somewhere the
+    // shape isn't (e.g. above it, falling through) -- see emitMode below for
+    // why that's only interesting in Free mode; in Shape Surface mode the
+    // spawn candidate box is immediately re-projected onto the shape
+    // regardless of where it was drawn from, so offsetting it just changes
+    // which side of the shape gets slightly denser sampling.
+    Vector3 positionOffset{ 0.0f, 0.0f, 0.0f };
+
+    // 0 = Shape Surface (today's only behavior): every candidate position is
+    // immediately Newton-projected onto the bound ShapeField's zero-surface
+    // (see particle_emit.comp's EMIT_MODE_SHAPE_SURFACE) -- particles are
+    // born already on/near the shape. 1 = Free: particles are born at
+    // Position +/- Position Offset/Jitter with Base Velocity +/- Velocity
+    // Jitter and *no* projection at all -- ordinary ballistic particles
+    // that only ever reach the shape if Shape Attraction pulls them there
+    // (or they fly through it under their own velocity), same as any other
+    // GpuEmitMode::Box emitter in this codebase. This is what makes a demo
+    // like "spawn above the shape and fall into it" possible -- Shape
+    // Surface mode can't show that because it never has free particles to
+    // begin with.
+    int emitMode = 0;
+
+    static const char* const* EmitModeNames() {
+        static const char* names[] = { "Shape Surface", "Free (Box)" };
+        return names;
+    }
+    static constexpr int kEmitModeCount = 2;
+
     Vector3 velocity{ 0.0f, 0.08f, 0.0f };
     Vector3 velocityJitter{ 0.12f, 0.12f, 0.12f };
 
@@ -67,22 +99,26 @@ struct FogEmissionSettings {
 
     void Visit(IParamVisitor& v) {
         FogEmissionSettings d;
-        v.Int(capacity, d.capacity, 1000, 4000000,
-            { "Fog Capacity", "Total SSBO pool size. Every alive particle pays for a full force evaluation each frame, so this is the single biggest lever on GPU cost. Changing this needs Rebuild Systems (bottom of panel) to actually reallocate the pool -- the slider alone does nothing until then.", ParamFlags::NeedsRebuild });
-        v.Float(spawnRate, d.spawnRate, 500.0f, 60000.0f,
-            { "Spawn Rate", "Particles spawned per second. Steady-state alive count is roughly rate x life; watch Fog Capacity above to avoid saturating the pool." });
+        v.Int(capacity, d.capacity, 1000, 20000000,
+            { "Fog Capacity", "Total SSBO pool size. particle_sim.comp dispatches over the FULL capacity every frame regardless of how many are actually alive -- this is the single biggest lever on GPU cost, not just a ceiling. To push particle count as high as possible: raise this AND Spawn Rate together (steady-state alive count is roughly Spawn Rate x Core Life, and only alive particles read as denser fog -- capacity alone with a low spawn rate just reserves unused pool). Watch the FPS counter and back off once it visibly drops. Changing this needs Rebuild Systems (bottom of panel) to actually reallocate the pool -- the slider alone does nothing until then.", ParamFlags::NeedsRebuild });
+        v.Float(spawnRate, d.spawnRate, 500.0f, 500000.0f,
+            { "Spawn Rate", "Particles spawned per second. Steady-state alive count is roughly rate x life; raise this together with Fog Capacity above (which must stay >= that product or new spawns silently drop once the pool is full) to actually reach a higher visible particle count, not just a bigger reserved pool." });
         v.Vec3(velocity, d.velocity, -2.0f, 2.0f,
-            { "Base Velocity", "Constant birth velocity, world-space. Real fog drifts, it doesn't spray -- keep this small." });
+            { "Base Velocity", "Constant birth velocity, world-space. Real fog drifts, it doesn't spray -- keep this small. In Free emit mode (see Emit Mode below) this is every particle's actual ballistic velocity, not just a drift on top of an SDF projection." });
         v.Vec3(velocityJitter, d.velocityJitter, 0.0f, 2.0f,
             { "Velocity Jitter", "Per-axis random range added to Base Velocity at spawn." });
         v.ColorField(colorA, d.colorA, { "Color A", "Particle albedo, low end of the random range. Visible color mostly comes from the core light, not this -- see Lighting." });
         v.ColorField(colorB, d.colorB, { "Color B", "Particle albedo, high end of the random range." });
-        v.Float(size, d.size, 0.02f, 1.0f, { "Sprite Size", "Base sprite radius, world units. Small + dense reads as continuous fog; large reads as visible discs." });
+        v.Float(size, d.size, 0.005f, 1.0f, { "Sprite Size", "Base sprite radius, world units. Small + dense reads as continuous fog; large reads as visible discs. Push toward the floor when maximizing particle count -- millions of small sprites read as smooth volume, the same count at a larger size reads as noisy clutter and costs more fill-rate." });
         v.Float(sizeJitter, d.sizeJitter, 0.0f, 0.5f, { "Size Jitter", "Random range added to Sprite Size at spawn." });
         v.Float(life, d.life, 1.0f, 120.0f, { "Core Life", "Lifetime (seconds) of the recruited fraction -- the population that stays locked to the shape. Long life is what makes the fog persist as one volume across shape changes." });
         v.Float(lifeJitter, d.lifeJitter, 0.0f, 40.0f, { "Core Life Jitter", "Random range added to Core Life." });
         v.Float(shedLife, d.shedLife, 0.2f, 30.0f, { "Shed Life", "Lifetime (seconds) of the fraction that misses shape recruitment -- reads as haze wisps peeling off." });
         v.Float(shedLifeJitter, d.shedLifeJitter, 0.0f, 10.0f, { "Shed Life Jitter", "Random range added to Shed Life." });
+        v.Enum(emitMode, d.emitMode, EmitModeNames(), kEmitModeCount,
+            { "Emit Mode", "Shape Surface (default): particles are born already projected onto the current shape's surface. Free (Box): particles are born at Position Offset +/- Spawn Candidate Extent with Base Velocity +/- Velocity Jitter and no projection at all -- ordinary ballistic particles that only reach the shape if Shape Attraction pulls them there (or they fly through it). Use Free mode to demo particles falling/drifting into a shape from outside it." });
+        v.Vec3(positionOffset, d.positionOffset, -15.0f, 15.0f,
+            { "Position Offset", "Added to Field Center to get the actual spawn position. 0 (the default) spawns exactly centered on the shape, same as every preset that predates this field. Nonzero is mainly useful with Free emit mode above -- e.g. offset upward so particles spawn above the shape and fall into it." });
     }
 };
 
@@ -100,6 +136,19 @@ struct FogForceSettings {
     float shapeAttraction = 1.8f;
     float shapeCurl = 0.3f;
     float flowNoiseScale = 0.35f;
+
+    // Opt-in, defaults to 0 -- see FogAudioSettings::sectionSmoothing's
+    // comment for why this is driven by FluxLevel() (a fast, per-hit
+    // onset signal) rather than the slow sectionEnergy_ envelope
+    // dragAudioScale/shapeAttractionAudioScale use: unlike drag/attraction
+    // (which should track a song *section's* overall loudness), turbulence
+    // scale is a spatial-frequency knob -- shifting it per onset reads as
+    // the noise texture itself gaining detail on a hit, not a mood change.
+    // Additive on top of turbulenceScale, clamped into the same [0.01,1]
+    // range that field's own slider uses (never 0/negative -- the curl
+    // noise's spatial frequency is undefined there) -- see
+    // ShapeFogEmitter::Update.
+    float turbulenceScaleAudioScale = 0.0f;
 
     void Visit(IParamVisitor& v) {
         FogForceSettings d;
@@ -119,6 +168,8 @@ struct FogForceSettings {
             { "Shape Curl", "Tangential flow-around-the-surface strength, layered on top of Shape Attraction so particles slide across the shape rather than snapping straight to it." });
         v.Float(flowNoiseScale, d.flowNoiseScale, 0.02f, 2.0f,
             { "Flow Noise Scale", "Spatial frequency of Shape Curl's noise, sampled at each particle's own position. Smaller = broader/slower swirls; larger = busier/finer ones." });
+        v.Float(turbulenceScaleAudioScale, d.turbulenceScaleAudioScale, 0.0f, 1.0f,
+            { "Turbulence Scale x Flux", "Turbulence Scale added per unit of spectral-flux onset strength (see FogAudioSettings) -- the noise texture itself gains detail on a hit, not just intensity. 0 (the default) is a no-op, matching every preset that predates this." });
     }
 };
 
@@ -186,6 +237,20 @@ struct FogAttractionSettings {
     // shapes/shape_conform.glsl. One continuous surface<->volume control.
     float volumeDepth = 0.0f;
 
+    // 0 (default -- every preset predating this field is byte-for-byte
+    // unaffected): Shape Attraction has no distance limit, exactly today's
+    // behavior -- a recruited particle anywhere is pulled toward the
+    // current shape regardless of how far away it is (the pull magnitude
+    // is clamped to the same max at any distance; see shape_conform.glsl).
+    // >0: attraction smoothly fades to exactly zero once a particle is
+    // farther than this from its target depth, so particles genuinely
+    // drift free (only Gravity/Turbulence/Drag act on them, if those are
+    // also on) until the shape's surface actually comes within range --
+    // the literal "particle encounters the SDF bound and only then gets
+    // pulled onto it" behavior. See shape_conform.glsl's own comment for
+    // the exact falloff curve.
+    float captureRange = 0.0f;
+
     void Visit(IParamVisitor& v) {
         FogAttractionSettings d;
         v.Float(candidateHalfExtent, d.candidateHalfExtent, 0.5f, 10.0f,
@@ -195,6 +260,8 @@ struct FogAttractionSettings {
             { "Recruit Fraction", "Fraction of new particles that get Core Life and stay locked to the shape (vs. Shed Life haze). High = the volume reads as one coherent mass." });
         v.Float(volumeDepth, d.volumeDepth, 0.0f, 4.0f,
             { "Volume Depth", "0 = particles hug the exact surface (a hollow lit skin). Raise it and they instead spread across nested depths inside the shape (a solid glowing body) -- a continuous surface<->volume control, not a fixed toggle." });
+        v.Float(captureRange, d.captureRange, 0.0f, 15.0f,
+            { "Attraction Capture Range", "0 (default) = Shape Attraction has no distance limit, exactly today's behavior. >0 = attraction fades to zero beyond this distance from the particle's target depth, so particles drift genuinely free until the shape's surface is actually within range -- use this for a 'particles only stick once the shape reaches them' setup (see the Static preset)." });
     }
 };
 
@@ -202,11 +269,7 @@ struct FogAttractionSettings {
 // Neon Fog: how this emitter's forces respond to music -- "destructive
 // but resisted": distinct musical features drive distinct existing
 // forces (Bass -> Gravity, Mid -> Shape Curl, Treble/Excitement ->
-// Turbulence), plus one-shot beat impacts, but nothing here ever touches
-// Shape Attraction/Morph Force/Recruit Fraction (FogForceSettings/
-// ShapeSettings/this struct's own recruit knobs live elsewhere), so the
-// silhouette always holds against whatever the music throws at it,
-// structurally rather than by convention. Gravity is safe to drive hard
+// Turbulence), plus one-shot beat impacts. Gravity is safe to drive hard
 // because it's always been "loose containment, well below Shape
 // Attraction" by design; Shape Curl is safe because shape_conform.glsl
 // projects it tangential to the surface (it can never pull a particle
@@ -215,6 +278,18 @@ struct FogAttractionSettings {
 // audio exists at all this session) -- `reactive` lets this emitter's
 // own response be muted separately, e.g. for a future second emitter
 // that shouldn't react the same way.
+//
+// Drag/Shape Attraction (dragAudioScale/shapeAttractionAudioScale below)
+// are the one deliberate exception to "never touches the silhouette's
+// hold" -- both default to 0 (a dial-tuned preset predating these fields
+// is byte-for-byte unaffected), and even dialed up, effectiveAttraction
+// is floored at 15% of the base Shape Attraction (see
+// ShapeFogEmitter::Update) so the silhouette can loosen dramatically on a
+// loud section without ever fully dissolving. This is the primary lever
+// for reading as genuinely more/less energetic across a song's quiet/
+// loud arc, not just perturbed within a fixed character -- see
+// sectionSmoothing's own comment for why it's driven by a slow envelope
+// distinct from motionSmoothing below.
 // -----------------------------------------------------------------------
 struct FogAudioSettings {
     bool reactive = true;
@@ -233,6 +308,25 @@ struct FogAudioSettings {
     float midCurlScale = 2.5f;           // Shape Curl += smoothed Mid * this -- more surface flow/swirl on rhythmic/melodic content
     float trebleTurbulenceScale = 0.8f;  // Turbulence Strength += instantaneous Treble * this -- fast, fizzy top-end response
     float excitementTurbulenceScale = 1.5f; // Turbulence Strength += smoothed overall Energy * this -- ambient agitation floor
+
+    // Independent, much longer low-pass over EnergyLevel() than
+    // motionSmoothing above -- tracks whether the current song *section*
+    // (verse/chorus/drop) is loud or quiet, not individual beats, which
+    // is what dragAudioScale/shapeAttractionAudioScale below need: a mood
+    // that shifts over seconds, not a twitch per kick. See
+    // ShapeFogEmitter::sectionEnergy_.
+    float sectionSmoothing = 3.0f;
+
+    // Opt-in (both default 0, see the class comment above). Subtracted
+    // from their base force as sectionEnergy_ rises -- loud sections read
+    // as loose/chaotic (low drag lets particles fly, weaker attraction
+    // lets the silhouette loosen), quiet sections settle back toward the
+    // base slider's tight/dense/slow resting state. See
+    // ShapeFogEmitter::Update for the exact clamped formulas (both have a
+    // hard floor -- drag can never reach 0/negative without the sim
+    // exploding, attraction never below 15% of its base).
+    float dragAudioScale = 0.0f;
+    float shapeAttractionAudioScale = 0.0f;
 
     // A hard beat both (a) gives the existing mass a one-shot outward kick
     // (GpuParticleSystem::ApplyRadialImpulse -- recruited particles wobble
@@ -266,6 +360,12 @@ struct FogAudioSettings {
             { "Turbulence x Treble", "Turbulence Strength added per unit of instantaneous Treble -- a fast, fizzy high-end response." });
         v.Float(excitementTurbulenceScale, d.excitementTurbulenceScale, 0.0f, 6.0f,
             { "Turbulence x Excitement", "Turbulence Strength added per unit of smoothed overall Energy -- a slow-moving ambient agitation floor." });
+        v.Float(sectionSmoothing, d.sectionSmoothing, 0.5f, 15.0f,
+            { "Section Smoothing", "Seconds; how slowly Drag x Section / Attraction x Section below track EnergyLevel() -- deliberately much longer than Motion Smoothing above, so this reads as the current song section being loud or quiet, not a per-beat twitch." });
+        v.Float(dragAudioScale, d.dragAudioScale, 0.0f, 5.0f,
+            { "Drag x Section", "Drag subtracted per unit of section energy -- loud sections loosen the fog (lower drag lets particles fly), quiet sections settle it back toward the base Drag slider. 0 (the default) is a no-op, matching every preset that predates this. Floored so drag can never reach 0/negative (see the class comment)." });
+        v.Float(shapeAttractionAudioScale, d.shapeAttractionAudioScale, 0.0f, 8.0f,
+            { "Attraction x Section", "Shape Attraction subtracted per unit of section energy -- loud sections let the silhouette loosen, quiet sections pull it back dense/tight. 0 (the default) is a no-op. Floored at 15% of base Shape Attraction so the silhouette never fully dissolves (see the class comment)." });
         v.Float(kickBeatThreshold, d.kickBeatThreshold, 0.0f, 1.0f,
             { "Kick Beat Threshold", "Minimum beat intensity that fires an outward kick impulse + debris burst." });
         v.Float(kickImpulseStrength, d.kickImpulseStrength, 0.0f, 15.0f, { "Kick Impulse Strength", "Outward velocity kick applied to particles near the field center on a hard beat." });
@@ -604,20 +704,26 @@ struct DebugSettings {
     bool showFieldAxes = false;
     bool showEmitterBounds = false;
     bool showForceVectors = false;
+    bool showVolumeBounds = false;
+    bool showOriginGizmo = false;
     bool disableSpriteNoise = false; // compare the raw circular sprite against the styled wispy look
 
     void Visit(IParamVisitor& v) {
         DebugSettings d;
         v.Bool(showShapeBounds, d.showShapeBounds,
-            { "Shape Bounds", "Wireframe of the current analytic shape target, for comparing against where particles actually sit." });
+            { "Shape Bounds", "Wireframe of the current analytic shape's exact surface (offset 0), for comparing against where particles actually sit. Also draws the bake grid extent (dim purple cube) and one corner voxel (magenta), so grid resolution/extent can be cross-checked too." });
         v.Bool(showLightGizmos, d.showLightGizmos,
             { "Light Gizmos", "Small sphere at the core light (real -- colored/sized by its current color and intensity) and a dim marker at the overhead shading position (not a real light -- see Neon Fog's class comment)." });
         v.Bool(showFieldAxes, d.showFieldAxes,
             { "Field Axes", "Field center plus a line toward the overhead shading direction." });
         v.Bool(showEmitterBounds, d.showEmitterBounds,
-            { "Emitter Bounds", "Wireframe box showing the region new particles' spawn candidates are drawn from before being projected onto the shape surface." });
+            { "Emitter Bounds", "Wireframe box (green) at Field Center + Position Offset, sized by Spawn Candidate Extent -- the region new particles' spawn candidates are drawn from before being projected onto the shape surface (Shape Surface mode) or used directly as birth position (Free mode). Independent of Shape Bounds once Position Offset is nonzero." });
         v.Bool(showForceVectors, d.showForceVectors,
-            { "Force Vectors", "Sampled gravity and shape-attraction direction arrows on a coarse shell around the shape. Turbulence/curl-noise isn't shown -- not cheap to mirror on the CPU without a GPU readback." });
+            { "Force Vectors", "Shape-attraction direction arrows (orange), sampled from the real baked field on a shell scaled to the shape's own Grid Half-Extent -- so it always wraps whatever shape/size is active instead of a fixed guess. Assumes Volume Depth 0 (exact-surface targeting); with Volume Depth > 0 each particle's real target is a per-particle random depth this can't cheaply show per-point. Gravity arrows were removed -- gravity is a trivial straight pull toward the single center dot Field Axes already shows, so a whole shell of arrows all pointing at one point added nothing Field Axes didn't." });
+        v.Bool(showVolumeBounds, d.showVolumeBounds,
+            { "Shell / Volume Bounds", "Two more shape wireframes at the shape's own surface offset by +/-Shell Thickness (yellow -- the actual random range newborn particles are scattered across at spawn) and by -Volume Depth (magenta -- the innermost depth the recruited fraction's random target can reach, i.e. how far Volume Depth spreads them into a solid body instead of a hollow skin)." });
+        v.Bool(showOriginGizmo, d.showOriginGizmo,
+            { "Origin Gizmo", "XYZ arrow triad at world (0,0,0) -- red=X, green=Y, blue=Z. Independent of the shape/field entirely, useful for judging how far Field Center has actually moved from world origin." });
         v.Bool(disableSpriteNoise, d.disableSpriteNoise,
             { "Disable Sprite Noise", "Compare the raw circular sprite (off) against the styled wispy noise-mask look (on, the default render)." });
     }
