@@ -117,69 +117,112 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
 }
 
 namespace {
-// Debug-gizmo-only analytic SDFs, ported directly from shape_bake.comp's
-// EvalShape (sdSphere/sdRoundBox/sdTorus/sdCappedCylinder) for a CPU-side
-// gradient (central differences) used only by the Force Vectors gizmo --
-// see NeonFogVisualizer::Draw. Same cross-file-must-match-the-GLSL risk
-// already accepted for ProceduralShapeType's enum values; if the shader's
-// dimensions change, these (and DrawShapeWireframe below) need updating
-// too. Not used by the sim itself -- that always samples the real baked
-// ShapeField, never this.
-float EvalShapeSdf(ProceduralShapeType type, Vector3 p) {
-    switch (type) {
-        case ProceduralShapeType::Sphere:
-            return Vector3Length(p) - 3.0f;
-        case ProceduralShapeType::Box: {
-            Vector3 q{ fabsf(p.x) - 2.4f, fabsf(p.y) - 2.4f, fabsf(p.z) - 2.4f };
-            Vector3 qMax{ fmaxf(q.x, 0.0f), fmaxf(q.y, 0.0f), fmaxf(q.z, 0.0f) };
-            float outside = Vector3Length(qMax);
-            float inside = fminf(fmaxf(q.x, fmaxf(q.y, q.z)), 0.0f);
-            return outside + inside - 0.4f;
+// Shared by both the Shape Bounds wireframe and the Force Vectors gizmo,
+// so both sample the field at the same points and only one direction-
+// generation exists.
+constexpr int kGizmoLatSteps = 6;
+constexpr int kGizmoLonSteps = 8;
+
+// Raymarches from the grid edge inward toward `center` along `dir`
+// (sphere-tracing against the real field: each step advances by the
+// current sample's |distance|, a safe conservative step since these SDFs
+// are exact, not just bounds), stopping at the first sign flip
+// (outside -> inside) and bisecting a few more steps for a clean point.
+// Starting from the edge and marching inward -- rather than assuming
+// `center` itself is inside the shape -- is what makes this correct for
+// every baked shape including Torus, whose own center point is actually
+// *outside* the tube (dist ~= +1.5 there); an outward-from-center march
+// would need special-casing per shape type, exactly the kind of
+// per-shape hardcoding this function exists to eliminate. Returns false
+// (leaves `outHit` untouched) if the ray never crosses within the grid's
+// extent.
+bool RaymarchToSurface(const ShapeField& field, Vector3 center, Vector3 dir, float startRadius, Vector3& outHit) {
+    constexpr int kMaxSteps = 48;
+    constexpr float kMinStep = 0.02f;
+
+    float t = startRadius;
+    ShapeField::FieldSample prev = field.SampleWorld(center + Vector3Scale(dir, t));
+    if (prev.distance <= 0.0f) {
+        outHit = center + Vector3Scale(dir, t);
+        return true;
+    }
+
+    for (int i = 0; i < kMaxSteps && t > 0.0f; i++) {
+        float step = fmaxf(prev.distance, kMinStep);
+        float nextT = fmaxf(t - step, 0.0f);
+        ShapeField::FieldSample cur = field.SampleWorld(center + Vector3Scale(dir, nextT));
+        if (cur.distance <= 0.0f) {
+            // Bisect between the last outside sample (t) and this inside
+            // one (nextT) for a cleaner crossing point.
+            float lo = nextT, hi = t;
+            for (int b = 0; b < 6; b++) {
+                float mid = (lo + hi) * 0.5f;
+                float d = field.SampleWorld(center + Vector3Scale(dir, mid)).distance;
+                if (d <= 0.0f) lo = mid; else hi = mid;
+            }
+            outHit = center + Vector3Scale(dir, (lo + hi) * 0.5f);
+            return true;
         }
-        case ProceduralShapeType::Torus: {
-            float qx = sqrtf(p.x * p.x + p.z * p.z) - 2.5f;
-            return sqrtf(qx * qx + p.y * p.y) - 1.0f;
-        }
-        case ProceduralShapeType::Cylinder: {
-            float dx = fabsf(sqrtf(p.x * p.x + p.z * p.z)) - 2.0f;
-            float dy = fabsf(p.y) - 2.6f;
-            float ax = fmaxf(dx, 0.0f), ay = fmaxf(dy, 0.0f);
-            return fminf(fmaxf(dx, dy), 0.0f) + sqrtf(ax * ax + ay * ay);
+        t = nextT;
+        prev = cur;
+        if (t <= 0.0f) break;
+    }
+    return false;
+}
+
+// Latitude/longitude wireframe of the ShapeField's actual zero-isosurface
+// -- replaces a previous hardcoded-per-shape-type primitive draw
+// (DrawSphereWires/DrawCubeWiresV/DrawCircle3D/DrawCylinderWires) that
+// silently drifted out of sync with shape_bake.comp's real dimensions
+// once already (a stale box half-extent -- the corner-rounding radius
+// expands a round box's flat-face surface *outward*, not just fillets
+// the corners inward, so the old hardcoded half-extent undersized the
+// wire by the rounding radius on every face). This version never
+// hardcodes a shape's geometry -- it only ever raymarches the field
+// itself, so it's automatically correct for any baked field, procedural
+// or (later) a real face mesh via MeshShapeProvider.
+void DrawFieldWireframe(const ShapeField& field, Color color) {
+    Vector3 center = field.Center();
+    float startRadius = field.HalfExtent();
+
+    // Interior rings, indexed [lat 1..kGizmoLatSteps-1][lon]; poles held
+    // separately since they're single points shared by every meridian.
+    Vector3 ringPoints[kGizmoLatSteps][kGizmoLonSteps];
+    bool ringHit[kGizmoLatSteps][kGizmoLonSteps] = {};
+
+    for (int lat = 1; lat < kGizmoLatSteps; lat++) {
+        float theta = PI * float(lat) / kGizmoLatSteps;
+        for (int lon = 0; lon < kGizmoLonSteps; lon++) {
+            float phi = 2.0f * PI * float(lon) / kGizmoLonSteps;
+            Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
+            ringHit[lat][lon] = RaymarchToSurface(field, center, dir, startRadius, ringPoints[lat][lon]);
         }
     }
-    return 0.0f;
-}
 
-Vector3 EvalShapeGradient(ProceduralShapeType type, Vector3 p) {
-    constexpr float e = 0.05f;
-    float dx = EvalShapeSdf(type, p + Vector3{ e, 0, 0 }) - EvalShapeSdf(type, p - Vector3{ e, 0, 0 });
-    float dy = EvalShapeSdf(type, p + Vector3{ 0, e, 0 }) - EvalShapeSdf(type, p - Vector3{ 0, e, 0 });
-    float dz = EvalShapeSdf(type, p + Vector3{ 0, 0, e }) - EvalShapeSdf(type, p - Vector3{ 0, 0, e });
-    return Vector3Normalize(Vector3{ dx, dy, dz });
-}
+    Vector3 northPoint{}, southPoint{};
+    bool gotNorth = RaymarchToSurface(field, center, Vector3{ 0, 1, 0 }, startRadius, northPoint);
+    bool gotSouth = RaymarchToSurface(field, center, Vector3{ 0, -1, 0 }, startRadius, southPoint);
 
-// Wireframe dimensions must match shape_bake.comp's EvalShape exactly --
-// see the cross-file comment above. Box ignores the shader's 0.4 corner
-// rounding (a sharp-cornered wire is a fine debug approximation); the
-// torus is simplified to two flat horizontal rings at its outer/inner
-// major radius rather than a full tube wireframe (per-segment tangent-
-// frame math not worth it for a debug gizmo) -- both still confirm
-// scale/position at a glance, which is the gizmo's whole job.
-void DrawShapeWireframe(ProceduralShapeType type, Vector3 center, Color color) {
-    switch (type) {
-        case ProceduralShapeType::Sphere:
-            DrawSphereWires(center, 3.0f, 12, 12, color);
-            break;
-        case ProceduralShapeType::Box:
-            DrawCubeWiresV(center, Vector3{ 4.8f, 4.8f, 4.8f }, color);
-            break;
-        case ProceduralShapeType::Torus:
-            DrawCircle3D(center, 3.5f, Vector3{ 1, 0, 0 }, 90.0f, color);
-            DrawCircle3D(center, 1.5f, Vector3{ 1, 0, 0 }, 90.0f, color);
-            break;
-        case ProceduralShapeType::Cylinder:
-            DrawCylinderWires(center - Vector3{ 0, 2.6f, 0 }, 2.0f, 2.0f, 5.2f, 16, color);
-            break;
+    // Rings: connect consecutive longitudes within a latitude row (closed loop).
+    for (int lat = 1; lat < kGizmoLatSteps; lat++) {
+        for (int lon = 0; lon < kGizmoLonSteps; lon++) {
+            int next = (lon + 1) % kGizmoLonSteps;
+            if (ringHit[lat][lon] && ringHit[lat][next]) {
+                DrawLine3D(ringPoints[lat][lon], ringPoints[lat][next], color);
+            }
+        }
+    }
+    // Meridians: pole -> first ring -> ... -> last ring -> pole.
+    for (int lon = 0; lon < kGizmoLonSteps; lon++) {
+        if (gotNorth && ringHit[1][lon]) DrawLine3D(northPoint, ringPoints[1][lon], color);
+        for (int lat = 1; lat < kGizmoLatSteps - 1; lat++) {
+            if (ringHit[lat][lon] && ringHit[lat + 1][lon]) {
+                DrawLine3D(ringPoints[lat][lon], ringPoints[lat + 1][lon], color);
+            }
+        }
+        if (gotSouth && ringHit[kGizmoLatSteps - 1][lon]) {
+            DrawLine3D(ringPoints[kGizmoLatSteps - 1][lon], southPoint, color);
+        }
     }
 }
 } // namespace
@@ -234,12 +277,23 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // gizmo built from it structurally cannot drift out of sync the way
     // reading a separate settings mirror could.
     if (ctx.debug != nullptr && shapeField_) {
+        // Shape Bounds and Force Vectors both sample shapeField_'s real
+        // baked data via SampleWorld(), which requires an up-to-date
+        // CPU-side readback -- see ShapeField::RefreshSampleCache's
+        // comment on why this is gated (a real GPU->CPU-readback cost)
+        // rather than refreshed unconditionally every frame: zero cost
+        // whenever neither gizmo is on, at most one readback per actual
+        // rebake while either is on.
+        if ((ctx.debug->showShapeBounds || ctx.debug->showForceVectors) && shapeField_->IsSampleCacheStale()) {
+            shapeField_->RefreshSampleCache();
+        }
+
         const Vector3 center = shapeField_->Center();
         const float halfExtent = shapeField_->HalfExtent();
         const int resolution = shapeField_->Resolution();
 
         if (ctx.debug->showShapeBounds) {
-            DrawShapeWireframe(static_cast<ProceduralShapeType>(shapeSettings_.shapeType), center, Fade(SKYBLUE, 0.5f));
+            DrawFieldWireframe(*shapeField_, Fade(SKYBLUE, 0.5f));
             // Bake-grid extent (the actual sampled volume), distinct from
             // the shape wireframe above -- lets grid resolution/extent be
             // visually cross-checked against where the shape sits inside it.
@@ -276,9 +330,7 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
         }
 
         if (ctx.debug->showForceVectors) {
-            ProceduralShapeType curType = static_cast<ProceduralShapeType>(shapeSettings_.shapeType);
             constexpr float kShellRadius = 4.0f;
-            constexpr int kLatSteps = 6, kLonSteps = 8;
             // Arrow lengths scale with the *actual* current strength
             // settings (not a fixed idealized length) so the gizmo visibly
             // grows/shrinks as Gravity Strength/Shape Attraction are tuned
@@ -293,10 +345,10 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
             float gravityArrowLen = Clamp(fog_.force.gravityStrength * 0.4f, 0.0f, 1.5f);
             bool showAttraction = morphStrength_ > 0.0001f;
             float attractArrowLen = Clamp(fog_.force.shapeAttraction * morphStrength_ * 0.25f, 0.0f, 1.5f);
-            for (int lat = 1; lat < kLatSteps; lat++) {
-                float theta = PI * float(lat) / kLatSteps; // polar angle; skip the exact poles
-                for (int lon = 0; lon < kLonSteps; lon++) {
-                    float phi = 2.0f * PI * float(lon) / kLonSteps;
+            for (int lat = 1; lat < kGizmoLatSteps; lat++) {
+                float theta = PI * float(lat) / kGizmoLatSteps; // polar angle; skip the exact poles
+                for (int lon = 0; lon < kGizmoLonSteps; lon++) {
+                    float phi = 2.0f * PI * float(lon) / kGizmoLonSteps;
                     Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
                     Vector3 samplePos = center + Vector3Scale(dir, kShellRadius);
 
@@ -314,17 +366,20 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
 
                     // Shape-attraction direction: points from outside
                     // toward the surface, mirroring shape_conform.glsl's
-                    // -sign(dist)*gradient (see EvalShapeGradient above).
-                    // Assumes Volume Depth == 0 (exact-surface targeting) --
-                    // with Volume Depth > 0 each particle's actual target
-                    // depth is a per-particle random roll (see
-                    // ApplyShapeConform's targetDist) this gizmo can't
-                    // cheaply replicate point-by-point, so it always shows
-                    // the surface-normal case as a known simplification.
+                    // -sign(dist)*gradient. Sampled from the real baked
+                    // field (shapeField_->SampleWorld -- same data
+                    // ApplyShapeConform itself samples), not a hand-copied
+                    // analytic SDF, so this can't drift out of sync with
+                    // whatever shape is actually baked. Assumes Volume
+                    // Depth == 0 (exact-surface targeting) -- with Volume
+                    // Depth > 0 each particle's actual target depth is a
+                    // per-particle random roll (see ApplyShapeConform's
+                    // targetDist) this gizmo can't cheaply replicate
+                    // point-by-point, so it always shows the
+                    // surface-normal case as a known simplification.
                     if (showAttraction) {
-                        Vector3 grad = EvalShapeGradient(curType, samplePos);
-                        float dist = EvalShapeSdf(curType, samplePos);
-                        Vector3 attractDir = Vector3Scale(grad, dist > 0.0f ? -1.0f : 1.0f);
+                        ShapeField::FieldSample fs = shapeField_->SampleWorld(samplePos);
+                        Vector3 attractDir = Vector3Scale(fs.gradient, fs.distance > 0.0f ? -1.0f : 1.0f);
                         DrawLine3D(samplePos, samplePos + Vector3Scale(attractDir, attractArrowLen), ORANGE);
                     }
                 }
