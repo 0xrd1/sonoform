@@ -25,9 +25,14 @@ struct FogEmissionSettings {
     // Sized for the SDF-biased-spawn design: since particles spawn already
     // on/near the shape surface rather than filling a diffuse volume, far
     // fewer are needed for a dense result than a naive approach would need.
-    int capacity = 320000;
+    int capacity = 600000;
 
-    float spawnRate = 9800.0f;          // particles/sec; steady-state alive count ~= rate * life
+    // particles/sec; steady-state alive count ~= rate * life. Scaled up
+    // from the old 9800 default to keep the same recruited/shed ratio at
+    // the new, higher capacity: core ~= 0.85*18000*30 ~= 459000, shed
+    // ~= 0.15*18000*6 ~= 16200, total ~= 475000 -- comfortably under the
+    // new default capacity.
+    float spawnRate = 18000.0f;
 
     Vector3 velocity{ 0.0f, 0.08f, 0.0f };
     Vector3 velocityJitter{ 0.12f, 0.12f, 0.12f };
@@ -35,7 +40,9 @@ struct FogEmissionSettings {
     Color colorA{ 0, 0, 0, 255 };       // set to the code defaults in EngineSettings.cpp-free init below
     Color colorB{ 0, 0, 0, 255 };
 
-    float size = 0.16f;
+    // Finer/denser-reading at the higher default particle count above --
+    // 0.16 read as "video game particles" rather than realistic fog.
+    float size = 0.11f;
     float sizeJitter = 0.07f;
 
     float life = 30.0f;                 // "core" life -- the population ShapeConform holds onto the shape
@@ -54,8 +61,8 @@ struct FogEmissionSettings {
 
     void Visit(IParamVisitor& v) {
         FogEmissionSettings d;
-        v.Int(capacity, d.capacity, 1000, 1000000,
-            { "Fog Capacity", "Total SSBO pool size. Every alive particle pays for a full force evaluation each frame, so this is the single biggest lever on GPU cost.", ParamFlags::NeedsRebuild });
+        v.Int(capacity, d.capacity, 1000, 4000000,
+            { "Fog Capacity", "Total SSBO pool size. Every alive particle pays for a full force evaluation each frame, so this is the single biggest lever on GPU cost. Changing this needs Rebuild Systems (bottom of panel) to actually reallocate the pool -- the slider alone does nothing until then.", ParamFlags::NeedsRebuild });
         v.Float(spawnRate, d.spawnRate, 500.0f, 60000.0f,
             { "Spawn Rate", "Particles spawned per second. Steady-state alive count is roughly rate x life; watch Fog Capacity above to avoid saturating the pool." });
         v.Vec3(velocity, d.velocity, -2.0f, 2.0f,
@@ -321,6 +328,55 @@ struct PostSettings {
         v.Float(bloomThreshold, d.bloomThreshold, 0.0f, 1.0f, { "Bloom Threshold", "Luma cutoff for the bright-pass extraction. Lower = more of the scene blooms." });
         v.Float(bloomIntensity, d.bloomIntensity, 0.0f, 5.0f, { "Bloom Intensity", "Additive strength of the blurred bright-pass over the scene." });
         v.Float(reactivityIntensity, d.reactivityIntensity, 0.1f, 4.0f, { "Reactivity Intensity", "Global multiplier applied to audio-reactive lighting (also nudged by '['/']')." });
+    }
+};
+
+// -----------------------------------------------------------------------
+// Display/pacing -- deliberately *not* part of VisitAll's preset round-trip
+// (see EngineUi.cpp): vsync/framerate are a machine characteristic, not
+// part of "the look", so they'd have no business being saved into a preset
+// file. Drawn as its own small panel group directly in DrawDebugPanel
+// instead. App applies changes at runtime (SetWindowState/SetTargetFPS)
+// only when a value actually changes -- see App::ApplyPerformanceSettings.
+// -----------------------------------------------------------------------
+struct PerformanceSettings {
+    bool vsync = true;
+    int targetFps = 60;   // 0 = uncapped -- lets you see the true achievable framerate
+
+    void Visit(IParamVisitor& v) {
+        PerformanceSettings d;
+        v.Bool(vsync, d.vsync, { "VSync", "Synchronize frame presentation to the display's refresh rate." });
+        v.Int(targetFps, d.targetFps, 0, 500,
+            { "Target FPS", "0 = uncapped. Useful with VSync off, to see how much particle-count headroom the GPU actually has before it starts to slow down." });
+    }
+};
+
+// -----------------------------------------------------------------------
+// Debug visualization: in-scene gizmo toggles. App-owned (like Camera/Post)
+// rather than visualizer-owned, since the concept ("show me the shape
+// bounds/lights/emitter/forces") is generic even though only Neon Fog
+// currently draws anything for it -- see Visualizer.h's
+// RenderContext::debug and NeonFogVisualizer::Draw.
+// -----------------------------------------------------------------------
+struct DebugSettings {
+    bool showShapeBounds = false;
+    bool showLightGizmos = false;
+    bool showFieldAxes = false;
+    bool showEmitterBounds = false;
+    bool showForceVectors = false;
+
+    void Visit(IParamVisitor& v) {
+        DebugSettings d;
+        v.Bool(showShapeBounds, d.showShapeBounds,
+            { "Shape Bounds", "Wireframe of the current analytic shape target, for comparing against where particles actually sit." });
+        v.Bool(showLightGizmos, d.showLightGizmos,
+            { "Light Gizmos", "Small sphere at the core light (real -- colored/sized by its current color and intensity) and a dim marker at the overhead shading position (not a real light -- see Neon Fog's class comment)." });
+        v.Bool(showFieldAxes, d.showFieldAxes,
+            { "Field Axes", "Field center plus a line toward the overhead shading direction." });
+        v.Bool(showEmitterBounds, d.showEmitterBounds,
+            { "Emitter Bounds", "Wireframe box showing the region new particles' spawn candidates are drawn from before being projected onto the shape surface." });
+        v.Bool(showForceVectors, d.showForceVectors,
+            { "Force Vectors", "Sampled gravity and shape-attraction direction arrows on a coarse shell around the shape. Turbulence/curl-noise isn't shown -- not cheap to mirror on the CPU without a GPU readback." });
     }
 };
 

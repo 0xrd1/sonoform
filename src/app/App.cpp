@@ -169,9 +169,25 @@ bool App::LoadAudio(const std::string& audioPathArg) {
     return true;
 }
 
+void App::ApplyPerformanceSettings() {
+    if (perfSettings_.vsync != lastVsync_) {
+        // raylib forwards FLAG_VSYNC_HINT's SetWindowState/ClearWindowState
+        // to glfwSwapInterval(1)/(0) at runtime on the desktop/GLFW backend
+        // this project targets -- no window recreation needed.
+        if (perfSettings_.vsync) SetWindowState(FLAG_VSYNC_HINT);
+        else ClearWindowState(FLAG_VSYNC_HINT);
+        lastVsync_ = perfSettings_.vsync;
+    }
+    if (perfSettings_.targetFps != lastTargetFps_) {
+        SetTargetFPS(perfSettings_.targetFps); // raylib treats 0 as uncapped
+        lastTargetFps_ = perfSettings_.targetFps;
+    }
+}
+
 void App::Run() {
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
+        ApplyPerformanceSettings();
         if (musicLoaded_) UpdateMusicStream(music_);
 
         if (IsWindowResized()) {
@@ -304,7 +320,7 @@ void App::Draw() {
     Vector3 right = Vector3Normalize(Vector3CrossProduct(forward, camera_.up));
     Vector3 up = Vector3CrossProduct(right, forward);
 
-    RenderContext ctx{ camera_, viewProj, right, up, accentTexture_ };
+    RenderContext ctx{ camera_, viewProj, right, up, accentTexture_, &debugSettings_ };
 
     // Blend mode is each visualizer's own responsibility now, not a
     // global wrap: additive suits self-luminous sparks/energy (bars,
@@ -374,6 +390,8 @@ void App::DrawUi() {
         state.renderer = particleRenderer_.get();
         state.camera = &cameraSettings_;
         state.post = &postSettings_;
+        state.performance = &perfSettings_;
+        state.debug = &debugSettings_;
         state.showHud = &showHud_;
         state.paused = &paused_;
         state.music = &music_;
@@ -382,6 +400,7 @@ void App::DrawUi() {
         state.trackLabel = trackLabel_.c_str();
 
         ui::DrawDebugPanel(state);
+        ui::DrawDebugWindow(state);
     }
 
     ui::EndFrame();

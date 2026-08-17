@@ -177,6 +177,74 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     lastTime_ = frame.time; // Draw() is const with no FrameContext of its own -- see the member's comment
 }
 
+namespace {
+// Debug-gizmo-only analytic SDFs, ported directly from shape_bake.comp's
+// EvalShape (sdSphere/sdRoundBox/sdTorus/sdCappedCylinder) for a CPU-side
+// gradient (central differences) used only by the Force Vectors gizmo --
+// see NeonFogVisualizer::Draw. Same cross-file-must-match-the-GLSL risk
+// already accepted for ProceduralShapeType's enum values; if the shader's
+// dimensions change, these (and DrawShapeWireframe below) need updating
+// too. Not used by the sim itself -- that always samples the real baked
+// ShapeField, never this.
+float EvalShapeSdf(ProceduralShapeType type, Vector3 p) {
+    switch (type) {
+        case ProceduralShapeType::Sphere:
+            return Vector3Length(p) - 3.0f;
+        case ProceduralShapeType::Box: {
+            Vector3 q{ fabsf(p.x) - 2.4f, fabsf(p.y) - 2.4f, fabsf(p.z) - 2.4f };
+            Vector3 qMax{ fmaxf(q.x, 0.0f), fmaxf(q.y, 0.0f), fmaxf(q.z, 0.0f) };
+            float outside = Vector3Length(qMax);
+            float inside = fminf(fmaxf(q.x, fmaxf(q.y, q.z)), 0.0f);
+            return outside + inside - 0.4f;
+        }
+        case ProceduralShapeType::Torus: {
+            float qx = sqrtf(p.x * p.x + p.z * p.z) - 2.5f;
+            return sqrtf(qx * qx + p.y * p.y) - 1.0f;
+        }
+        case ProceduralShapeType::Cylinder: {
+            float dx = fabsf(sqrtf(p.x * p.x + p.z * p.z)) - 2.0f;
+            float dy = fabsf(p.y) - 2.6f;
+            float ax = fmaxf(dx, 0.0f), ay = fmaxf(dy, 0.0f);
+            return fminf(fmaxf(dx, dy), 0.0f) + sqrtf(ax * ax + ay * ay);
+        }
+    }
+    return 0.0f;
+}
+
+Vector3 EvalShapeGradient(ProceduralShapeType type, Vector3 p) {
+    constexpr float e = 0.05f;
+    float dx = EvalShapeSdf(type, p + Vector3{ e, 0, 0 }) - EvalShapeSdf(type, p - Vector3{ e, 0, 0 });
+    float dy = EvalShapeSdf(type, p + Vector3{ 0, e, 0 }) - EvalShapeSdf(type, p - Vector3{ 0, e, 0 });
+    float dz = EvalShapeSdf(type, p + Vector3{ 0, 0, e }) - EvalShapeSdf(type, p - Vector3{ 0, 0, e });
+    return Vector3Normalize(Vector3{ dx, dy, dz });
+}
+
+// Wireframe dimensions must match shape_bake.comp's EvalShape exactly --
+// see the cross-file comment above. Box ignores the shader's 0.4 corner
+// rounding (a sharp-cornered wire is a fine debug approximation); the
+// torus is simplified to two flat horizontal rings at its outer/inner
+// major radius rather than a full tube wireframe (per-segment tangent-
+// frame math not worth it for a debug gizmo) -- both still confirm
+// scale/position at a glance, which is the gizmo's whole job.
+void DrawShapeWireframe(ProceduralShapeType type, Vector3 center, Color color) {
+    switch (type) {
+        case ProceduralShapeType::Sphere:
+            DrawSphereWires(center, 3.0f, 12, 12, color);
+            break;
+        case ProceduralShapeType::Box:
+            DrawCubeWiresV(center, Vector3{ 4.8f, 4.8f, 4.8f }, color);
+            break;
+        case ProceduralShapeType::Torus:
+            DrawCircle3D(center, 3.5f, Vector3{ 1, 0, 0 }, 90.0f, color);
+            DrawCircle3D(center, 1.5f, Vector3{ 1, 0, 0 }, 90.0f, color);
+            break;
+        case ProceduralShapeType::Cylinder:
+            DrawCylinderWires(center - Vector3{ 0, 2.6f, 0 }, 2.0f, 2.0f, 5.2f, 16, color);
+            break;
+    }
+}
+} // namespace
+
 void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // The stage: drawn first as opaque background geometry (default blend,
     // depth test+write on) so the fog correctly blends over it afterward
@@ -216,6 +284,72 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     BeginBlendMode(BLEND_ADDITIVE);
     lightning_.Draw(lightningSettings_);
     EndBlendMode();
+
+    // Debug gizmos: opaque, default blend, drawn last/on top -- see
+    // ui::DebugSettings and RenderContext::debug's comment.
+    if (ctx.debug != nullptr) {
+        const Vector3 center = shapeSettings_.fieldCenter;
+
+        if (ctx.debug->showShapeBounds) {
+            DrawShapeWireframe(static_cast<ProceduralShapeType>(shapeSettings_.shapeType), center, Fade(SKYBLUE, 0.5f));
+        }
+
+        if (ctx.debug->showFieldAxes) {
+            DrawSphere(center, 0.15f, Fade(WHITE, 0.6f));
+            Vector3 toLight = Vector3Normalize(Vector3Subtract(lightingSettings_.overheadLightPos, center));
+            Vector3 tip = center + Vector3Scale(toLight, 3.0f);
+            DrawLine3D(center, tip, YELLOW);
+            DrawSphere(tip, 0.1f, YELLOW);
+        }
+
+        if (ctx.debug->showLightGizmos) {
+            // The real light: sized/colored by its actual current state,
+            // so this gizmo also doubles as a live readout of it.
+            float coreRadius = Clamp(coreLightIntensity_ * 0.05f, 0.1f, 0.6f);
+            DrawSphere(center, coreRadius, coreLightColor_);
+            DrawSphereWires(center, coreRadius + 0.05f, 8, 8, WHITE);
+            // Shading-only position -- deliberately dim/muted, it's not a
+            // real light on the particles (see the class comment).
+            DrawSphere(lightingSettings_.overheadLightPos, 0.2f, Fade(WHITE, 0.35f));
+            DrawSphereWires(lightingSettings_.overheadLightPos, 0.25f, 8, 8, Fade(WHITE, 0.5f));
+        }
+
+        if (ctx.debug->showEmitterBounds) {
+            float ext = shapeSettings_.candidateHalfExtent * 2.0f;
+            DrawCubeWiresV(center, Vector3{ ext, ext, ext }, Fade(GREEN, 0.6f));
+        }
+
+        if (ctx.debug->showForceVectors) {
+            ProceduralShapeType curType = static_cast<ProceduralShapeType>(shapeSettings_.shapeType);
+            constexpr float kShellRadius = 4.0f;
+            constexpr float kArrowLength = 0.6f;
+            constexpr int kLatSteps = 6, kLonSteps = 8;
+            for (int lat = 1; lat < kLatSteps; lat++) {
+                float theta = PI * float(lat) / kLatSteps; // polar angle; skip the exact poles
+                for (int lon = 0; lon < kLonSteps; lon++) {
+                    float phi = 2.0f * PI * float(lon) / kLonSteps;
+                    Vector3 dir{ sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi) };
+                    Vector3 samplePos = center + Vector3Scale(dir, kShellRadius);
+
+                    // Gravity: closed-form, mirrors forces.glsl's
+                    // FORCE_GRAVITY_WELL exactly (direction only -- actual
+                    // magnitude varies by orders of magnitude across the
+                    // shell and isn't useful to show at gizmo-arrow scale).
+                    Vector3 toCenter = Vector3Subtract(center, samplePos);
+                    Vector3 gravityDir = Vector3Normalize(toCenter);
+                    DrawLine3D(samplePos, samplePos + Vector3Scale(gravityDir, kArrowLength), SKYBLUE);
+
+                    // Shape-attraction direction: points from outside
+                    // toward the surface, mirroring shape_conform.glsl's
+                    // -sign(dist)*gradient (see EvalShapeGradient above).
+                    Vector3 grad = EvalShapeGradient(curType, samplePos);
+                    float dist = EvalShapeSdf(curType, samplePos);
+                    Vector3 attractDir = Vector3Scale(grad, dist > 0.0f ? -1.0f : 1.0f);
+                    DrawLine3D(samplePos, samplePos + Vector3Scale(attractDir, kArrowLength), ORANGE);
+                }
+            }
+        }
+    }
 }
 
 namespace {

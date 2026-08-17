@@ -28,6 +28,12 @@ private:
     void UpdateCameraOrbit(float dt);
     bool LoadAudio(const std::string& audioPathArg);
 
+    // Applies perfSettings_ to the actual window/frame-pacing state, but
+    // only on an actual change (compares against lastVsync_/lastTargetFps_)
+    // -- SetWindowState/SetTargetFPS every frame regardless would be wasted
+    // driver calls for two values that are almost always unchanged.
+    void ApplyPerformanceSettings();
+
     Camera3D camera_{};
     ui::CameraSettings cameraSettings_;
     // Latches the right-drag orbit gesture on mouse-down rather than
@@ -65,6 +71,12 @@ private:
     Texture2D accentTexture_{};
 
     ui::PostSettings postSettings_;
+    ui::PerformanceSettings perfSettings_;
+    ui::DebugSettings debugSettings_;
+    // Last-applied values, so ApplyPerformanceSettings only calls into
+    // raylib/GLFW when perfSettings_ actually changed since last frame.
+    bool lastVsync_ = perfSettings_.vsync;
+    int lastTargetFps_ = perfSettings_.targetFps;
     bool paused_ = false;
     float elapsedTime_ = 0.0f;
     bool showHud_ = true;

@@ -4,7 +4,7 @@
 class ShaderLibrary;
 class ParticleRenderer;
 class AudioAnalyzer;
-namespace ui { class IParamVisitor; }
+namespace ui { class IParamVisitor; struct DebugSettings; }
 
 // Everything a visualizer needs to advance its simulation for one frame.
 struct FrameContext {
@@ -29,6 +29,12 @@ struct RenderContext {
     // Fireworks' shell markers) -- everything that's actually part of a
     // particle *system* renders through GpuParticleSystem::Draw instead.
     Texture2D accentTexture;
+
+    // In-scene debug gizmo toggles (shape bounds, lights, field axes,
+    // emitter bounds, force vectors) -- see ui::DebugSettings and
+    // NeonFogVisualizer::Draw. Null when the App-level debug window hasn't
+    // set one up, so a visualizer's Draw() must null-check before use.
+    const ui::DebugSettings* debug = nullptr;
 };
 
 // One visual "scene": owns its own GPU particle system(s) and forces,

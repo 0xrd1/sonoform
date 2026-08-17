@@ -18,6 +18,23 @@ namespace {
 constexpr const char* kPresetsDir = "settings/presets";
 constexpr const char* kDefaultPath = "settings/default.ini";
 
+// Both windows default to the right edge of the screen, stacked downward
+// (see the plan's "growing down" ask) -- FirstUseEver only, so this is a
+// *default* the user can freely drag/resize away from during the session;
+// io.IniFilename == nullptr (see Setup()) means it re-applies fresh every
+// launch rather than remembering wherever it was last dragged to.
+constexpr float kWindowMargin = 20.0f;
+constexpr float kPanelWidth = 480.0f;
+constexpr float kPanelHeightEstimate = 760.0f; // only used to place the *next* stacked window
+constexpr float kDebugWindowWidth = 340.0f;
+
+// A fixed, modest item width rather than ImGui's default (which sizes to
+// whatever's left of the current row) is what actually fixes labels being
+// pushed off-window: two levels of BeginGroup/Indent (see
+// ImGuiPanelVisitor) eat real width before a slider ever gets to size
+// itself, and the default sizing has no idea that happened.
+constexpr float kItemWidth = 160.0f;
+
 // The one place that knows the full shape of "everything persisted":
 // Camera, Post/Global, and whatever the current visualizer exposes via
 // VisitSettings. Used identically by the panel draw, Save/Load, and the
@@ -77,15 +94,17 @@ bool WantsMouse() {
 void DrawDebugPanel(PanelState& state) {
     if (state.visualizers == nullptr || state.camera == nullptr || state.post == nullptr) return;
 
-    ImGui::SetNextWindowSize(ImVec2(440, 640), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(kPanelWidth, kPanelHeightEstimate), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(GetScreenWidth() - kPanelWidth - kWindowMargin, kWindowMargin), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Engine Settings")) {
         ImGui::End();
         return;
     }
+    ImGui::PushItemWidth(kItemWidth);
 
     ImGui::Text("FPS: %d   Particles: %d", GetFPS(), state.particleCount);
     ImGui::Text("Track: %s", state.trackLabel);
+    ImGui::TextDisabled("Ctrl+Click or double-click any slider to type an exact value");
 
     if (state.paused != nullptr) {
         bool wasPaused = *state.paused;
@@ -116,6 +135,15 @@ void DrawDebugPanel(PanelState& state) {
         // to the widgets it's about to draw.
         ImGuiPanelVisitor panel;
         VisitAll(state, panel);
+
+        // Not part of VisitAll/the preset round-trip -- see
+        // PerformanceSettings' own comment on why (a machine
+        // characteristic, not part of "the look").
+        if (state.performance != nullptr) {
+            panel.BeginGroup("Performance");
+            state.performance->Visit(panel);
+            panel.EndGroup();
+        }
     }
 
     ImGui::Separator();
@@ -166,6 +194,30 @@ void DrawDebugPanel(PanelState& state) {
         ImGui::PopID();
     }
 
+    ImGui::PopItemWidth();
+    ImGui::End();
+}
+
+void DrawDebugWindow(PanelState& state) {
+    if (state.debug == nullptr) return;
+
+    // Stacked below the settings window's estimated height -- see
+    // kPanelHeightEstimate's comment: a default only, not enforced.
+    ImGui::SetNextWindowSize(ImVec2(kDebugWindowWidth, 260.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(
+        ImVec2(GetScreenWidth() - kDebugWindowWidth - kWindowMargin, kWindowMargin + kPanelHeightEstimate + kWindowMargin),
+        ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Debug View")) {
+        ImGui::End();
+        return;
+    }
+    ImGui::PushItemWidth(kItemWidth);
+
+    ImGui::TextDisabled("In-scene gizmos, drawn by the current visualizer");
+    ImGuiPanelVisitor panel;
+    state.debug->Visit(panel);
+
+    ImGui::PopItemWidth();
     ImGui::End();
 }
 

@@ -16,6 +16,8 @@ namespace ui {
 
 struct CameraSettings;
 struct PostSettings;
+struct PerformanceSettings;
+struct DebugSettings;
 
 // Everything the debug panel needs, as raw pointers into App's own fields
 // rather than a copy-in/copy-back struct -- so a slider takes effect the
@@ -30,6 +32,8 @@ struct PanelState {
 
     CameraSettings* camera = nullptr;
     PostSettings* post = nullptr;
+    PerformanceSettings* performance = nullptr; // not part of the preset round-trip -- see its own comment
+    DebugSettings* debug = nullptr;             // drawn in its own stacked window -- see DrawDebugWindow
 
     bool* showHud = nullptr;
     bool* paused = nullptr;
@@ -70,6 +74,11 @@ bool WantsMouse();
 // Visualizer::VisitSettings), a Rebuild Systems button for any
 // NeedsRebuild field, and Save/Load preset controls under settings/.
 void DrawDebugPanel(PanelState& state);
+
+// Draws the separate "Debug View" window (in-scene gizmo toggles -- see
+// ui::DebugSettings) stacked below DrawDebugPanel's window, right-anchored
+// the same way. A no-op if state.debug is null.
+void DrawDebugWindow(PanelState& state);
 
 // Loads settings/default.ini into `state`'s bound Camera/Post/current-
 // visualizer settings if that file exists. Called once by App::Init after
