@@ -27,31 +27,38 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
                               Vector3 shadeLightDir, float shadeAmbientFloor, const AudioAnalyzer& audioAnalyzer) {
     if (!system_) return;
 
-    // Forces are re-pushed every frame so panel edits apply live -- see
-    // ui::FogForceSettings/FogAttractionSettings. Note what audio never
-    // touches: shapeAttraction/shapeCurl/morphStrength here are exactly
-    // the panel/driver values, un-modulated -- see FogAudioSettings'
-    // comment on why the shape-holding forces are structurally exempt
-    // from audio reactivity ("destructive but resisted").
-    system_->SetForce(shapeConformForceIndex_,
-        gpu_force::ShapeConform(force.shapeAttraction, force.shapeCurl, morphStrength, attraction.recruitFraction,
-                                 attraction.volumeDepth, force.flowNoiseScale));
-    system_->SetForce(gravityForceIndex_, gpu_force::GravityWell(field.Center(), force.gravityStrength, force.gravitySoftening));
-
-    // Turbulence is the one force audio is allowed to add to: the base
-    // slider stays the resting/ambient value, audio adds on top for this
-    // frame only (never written back into force.turbulenceStrength
-    // itself) -- same "base + audio scale" pattern FogLightingSettings'
-    // hue/intensity fields already use. Excitement is a slow envelope
-    // (eased toward Energy() at a tunable rate) so the ambient turbulence
-    // floor breathes with the track instead of jittering every FFT
-    // update; Treble is read raw for a faster, fizzier top-end response.
+    // Distinct musical features drive distinct forces -- see
+    // FogAudioSettings' class comment for why each target is safe to
+    // drive hard without ever weakening the shape's hold: Gravity has
+    // always been "loose containment, well below Shape Attraction";
+    // Shape Curl is tangential-only (shape_conform.glsl projects it
+    // perpendicular to the gradient, so it can slide particles across the
+    // surface but never pull them off it). Bass/Mid are smoothed (eased
+    // toward the raw band value at audio.motionSmoothing's rate) so the
+    // forces they drive breathe with the track instead of jittering every
+    // FFT update; Treble stays instantaneous, the deliberately fast
+    // "sparkle" signal. None of this ever touches shapeAttraction/
+    // morphStrength/recruitFraction -- the panel/driver values for those
+    // are passed through completely un-modulated below.
+    float effectiveGravity = force.gravityStrength;
+    float effectiveCurl = force.shapeCurl;
     float effectiveTurbulence = force.turbulenceStrength;
     if (audio.reactive) {
-        float smoothing = std::max(audio.excitementSmoothing, 0.01f);
-        excitement_ += (audioAnalyzer.Energy() - excitement_) * std::min(1.0f, dt / smoothing);
-        effectiveTurbulence += excitement_ * audio.turbulenceEnergyScale + audioAnalyzer.Treble() * audio.turbulenceTrebleScale;
+        float smoothing = std::max(audio.motionSmoothing, 0.01f);
+        float lag = std::min(1.0f, dt / smoothing);
+        bassSmoothed_ += (audioAnalyzer.Bass() - bassSmoothed_) * lag;
+        midSmoothed_ += (audioAnalyzer.Mid() - midSmoothed_) * lag;
+        excitement_ += (audioAnalyzer.Energy() - excitement_) * lag;
+
+        effectiveGravity += bassSmoothed_ * audio.bassGravityScale;
+        effectiveCurl += midSmoothed_ * audio.midCurlScale;
+        effectiveTurbulence += excitement_ * audio.excitementTurbulenceScale + audioAnalyzer.Treble() * audio.trebleTurbulenceScale;
     }
+
+    system_->SetForce(shapeConformForceIndex_,
+        gpu_force::ShapeConform(force.shapeAttraction, effectiveCurl, morphStrength, attraction.recruitFraction,
+                                 attraction.volumeDepth, force.flowNoiseScale));
+    system_->SetForce(gravityForceIndex_, gpu_force::GravityWell(field.Center(), effectiveGravity, force.gravitySoftening));
     system_->SetForce(turbulenceForceIndex_, gpu_force::Turbulence(effectiveTurbulence, force.turbulenceScale));
     system_->SetForce(dragForceIndex_, gpu_force::Drag(force.dragCoefficient));
 
@@ -120,6 +127,34 @@ void ShapeFogEmitter::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 
     // visible "pop in" no matter how the lifecycle/spawn-rate was tuned.
     system_->Draw(viewProj, cameraRight, cameraUp, /*fadeMode=*/2, /*sizeScale=*/1.0f,
                   lights, lightCount, time, spriteStyle);
+}
+
+void ShapeFogEmitter::EmitImpactBurst(Vector3 center) {
+    if (!system_ || audio.kickBurstCount <= 0) return;
+
+    GpuEmitParams ep;
+    ep.mode = GpuEmitMode::Sphere; // uniform random outward direction -- see GpuEmitMode's comment
+    ep.position = center;
+    ep.positionJitter = { attraction.candidateHalfExtent, attraction.candidateHalfExtent, attraction.candidateHalfExtent };
+    ep.speedMin = audio.kickBurstSpeed;
+    ep.speedMax = audio.kickBurstSpeed + audio.kickBurstSpeedJitter;
+
+    ep.colorA = emission.colorA;
+    ep.colorB = emission.colorB;
+    ep.size = emission.size;
+    ep.sizeJitter = emission.sizeJitter;
+
+    // recruitFraction 0 -- see the header's comment: guaranteed to take
+    // the shed-life branch (particle_emit.comp), so every burst particle
+    // flies out, fades, and despawns, never gets pulled back by Shape
+    // Attraction the way a KickImpulse-nudged recruited particle would.
+    ep.recruitFraction = 0.0f;
+    ep.shedLife = audio.kickBurstLife;
+    ep.shedLifeJitter = audio.kickBurstLifeJitter;
+    ep.life = audio.kickBurstLife; // unused at recruitFraction 0, set to a sane value regardless
+    ep.lifeJitter = audio.kickBurstLifeJitter;
+
+    system_->Emit(ep, audio.kickBurstCount);
 }
 
 void ShapeFogEmitter::VisitSettings(ui::IParamVisitor& v) {

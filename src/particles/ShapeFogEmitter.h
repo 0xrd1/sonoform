@@ -67,6 +67,20 @@ public:
         if (system_) system_->ApplyRadialImpulse(center, strength, maxRadius);
     }
 
+    // Emits a burst of `audio.kickBurstCount` guaranteed-unrecruited
+    // debris particles (recruitFraction 0 -- see GpuEmitParams), scattered
+    // across `attraction.candidateHalfExtent` (proportional to the
+    // shape's own scale) around `center` with a strong outward velocity
+    // (audio.kickBurstSpeed/SpeedJitter) and a short life
+    // (audio.kickBurstLife/LifeJitter). Unlike KickImpulse (which nudges
+    // the *existing* mass -- recruited particles wobble and get pulled
+    // back by Shape Attraction), every particle from this burst is
+    // guaranteed to fly out, fade via the existing two-sided fade curve,
+    // and despawn -- never resettles on the shape. Called alongside
+    // KickImpulse on a hard beat (see NeonFogVisualizer::Update) so the
+    // hit reads unambiguously as particles being expelled.
+    void EmitImpactBurst(Vector3 center);
+
     // Wraps emission/force/attraction/audio's own Visit() in named
     // sub-groups -- see EngineSettings.h's FogEmissionSettings/
     // FogForceSettings/FogAttractionSettings/FogAudioSettings. Caller
@@ -90,8 +104,12 @@ private:
 
     float spawnAccumulator_ = 0.0f;
 
-    // Smoothed audio-energy envelope driving Turbulence x Excitement (see
-    // FogAudioSettings) -- eased rather than read raw so slower knobs
-    // don't jitter frame-to-frame with every FFT update.
+    // Smoothed audio-band envelopes driving Gravity x Bass / Curl x Mid /
+    // Turbulence x Excitement (see FogAudioSettings) -- eased rather than
+    // read raw so the forces they drive don't jitter frame-to-frame with
+    // every FFT update. Treble stays unsmoothed (read directly in
+    // Update()) -- it's deliberately the fast, instantaneous signal.
+    float bassSmoothed_ = 0.0f;
+    float midSmoothed_ = 0.0f;
     float excitement_ = 0.0f;
 };

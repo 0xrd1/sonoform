@@ -13,6 +13,12 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
                                                 shapeSettings_.fieldCenter, shapeSettings_.gridHalfExtent);
     shapeProvider_ = std::make_unique<ProceduralShapeProvider>(static_cast<ProceduralShapeType>(shapeSettings_.shapeType));
     shapeProvider_->BakeInto(*shapeField_, 0.0f);
+    // Populates the CPU sample cache immediately -- see Update()'s
+    // needsRebake block for why this can't wait for the first live
+    // rebake: LightningSystem (and, when shown, the debug gizmos) sample
+    // the field via SampleWorld(), which returns a harmless-but-useless
+    // default (dist 0) until the cache has been populated at least once.
+    shapeField_->RefreshSampleCache();
 
     fog_.Init(shaders, renderer, *shapeField_);
     // fog_.Update() (called every frame, before Draw() -- see App::Run's
@@ -67,6 +73,13 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
         shapeField_->SetCenter(shapeSettings_.fieldCenter);
         shapeField_->SetHalfExtent(shapeSettings_.gridHalfExtent);
         shapeProvider_->BakeInto(*shapeField_, 0.0f);
+        // Unconditional now, not gated behind debug-view visibility: real
+        // (non-debug) features depend on this too -- LightningSystem
+        // samples the field to keep bolts contained inside the shape, and
+        // needs it fresh every time the shape changes, not just when
+        // Shape Bounds/Force Vectors happen to be shown. See Draw()'s
+        // gizmo block, which no longer does its own gated refresh.
+        shapeField_->RefreshSampleCache();
     }
 
     // Auto-advance through shape presets on a fixed timer so the morph is
@@ -116,22 +129,25 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     bool fireLightning = strongBeat && lightningCooldown_ <= 0.0f;
     float lightningStrength = Clamp(frame.audio.BeatIntensity() + frame.audio.Treble(), 0.0f, 1.0f);
 
-    lightning_.Update(frame.dt, shapeField_->Center(), fireLightning, lightningStrength, lightningSettings_);
+    lightning_.Update(frame.dt, *shapeField_, fireLightning, lightningStrength, lightningSettings_);
     if (fireLightning) lightningCooldown_ = lightningSettings_.cooldownSeconds;
 
-    // Kick impulse: a separate hard-beat trigger/cooldown from lightning's
-    // (see FogAudioSettings::kickBeatThreshold -- kicks and bolts don't
-    // have to agree on what counts as "hard"), knocking particles loose
-    // near the field center on impact. Recruited particles wobble and get
+    // Kick impulse + impact burst: a separate hard-beat trigger/cooldown
+    // from lightning's (see FogAudioSettings::kickBeatThreshold -- kicks
+    // and bolts don't have to agree on what counts as "hard"). KickImpulse
+    // nudges the *existing* mass (recruited particles wobble and get
     // pulled back by Shape Attraction; shed ones fly off and despawn on
-    // schedule -- the "some particles get kicked out from a kick drum"
-    // feel, without ever touching the forces that hold the silhouette
-    // together.
+    // schedule); EmitImpactBurst adds a dedicated, guaranteed-unrecruited
+    // burst of debris on top so a hard hit unambiguously reads as
+    // particles being expelled -- see ShapeFogEmitter::EmitImpactBurst's
+    // comment -- without ever touching the forces that hold the
+    // silhouette together.
     kickCooldown_ = std::max(0.0f, kickCooldown_ - frame.dt);
     if (fog_.audio.reactive) {
         bool hardBeat = frame.audio.BeatTriggered() && frame.audio.BeatIntensity() > fog_.audio.kickBeatThreshold;
         if (hardBeat && kickCooldown_ <= 0.0f) {
             fog_.KickImpulse(shapeField_->Center(), fog_.audio.kickImpulseStrength, fog_.audio.kickImpulseRadius);
+            fog_.EmitImpactBurst(shapeField_->Center());
             kickCooldown_ = fog_.audio.kickCooldownSeconds;
         }
     }
@@ -201,16 +217,11 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // reading a separate settings mirror could.
     if (ctx.debug != nullptr && shapeField_) {
         // Shape Bounds and Force Vectors both sample shapeField_'s real
-        // baked data via SampleWorld(), which requires an up-to-date
-        // CPU-side readback -- see ShapeField::RefreshSampleCache's
-        // comment on why this is gated (a real GPU->CPU-readback cost)
-        // rather than refreshed unconditionally every frame: zero cost
-        // whenever neither gizmo is on, at most one readback per actual
-        // rebake while either is on.
-        if ((ctx.debug->showShapeBounds || ctx.debug->showForceVectors) && shapeField_->IsSampleCacheStale()) {
-            shapeField_->RefreshSampleCache();
-        }
-
+        // baked data via SampleWorld() -- the CPU-side cache it reads is
+        // kept fresh unconditionally by Update()'s rebake block now
+        // (LightningSystem needs it every beat, not just when these
+        // gizmos happen to be shown -- see NeonFogVisualizer::Update()),
+        // so no gated refresh is needed here anymore.
         const Vector3 center = shapeField_->Center();
         const float halfExtent = shapeField_->HalfExtent();
         const int resolution = shapeField_->Resolution();

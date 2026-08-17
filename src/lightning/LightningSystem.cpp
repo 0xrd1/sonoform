@@ -1,5 +1,6 @@
 #include "LightningSystem.h"
 #include "EngineSettings.h"
+#include "ShapeField.h"
 #include "raymath.h"
 #include <cmath>
 #include <algorithm>
@@ -53,26 +54,65 @@ std::vector<Vector3> BuildFractalPath(Vector3 start, Vector3 end, int depth, flo
     return path;
 }
 
+// Finds a point inside the shape's real baked SDF near `around`, using
+// the field's own gradient to step each random candidate toward the
+// interior (the same Newton-step-toward-the-surface technique
+// particle_emit.comp's ShapeSurface spawn mode already uses) rather than
+// blind rejection sampling. Blind rejection (try a uniform-random point,
+// check if it's inside) was the first version of this function and had a
+// real, observed failure mode: a thin shape like Torus occupies only a
+// few percent of a search box sized to the field's full half-extent, so
+// a bounded number of tries missed it roughly half the time, silently
+// falling back to `around` for both endpoints and producing an invisible
+// (zero-length) "bolt." Gradient-stepping converges onto the shape from
+// any starting candidate in a handful of iterations regardless of how
+// thin or small it is relative to the search box.
+//
+// `searchRadius` only controls how far the *starting* candidates are
+// scattered around `around` (for variety between calls) -- it does not
+// need to be shape-sized the way the old rejection radius effectively
+// did. Falls back to `around` itself if every candidate still lands
+// outside (e.g. `around` is far outside the field entirely), so this
+// always returns *something* usable rather than looping forever.
+Vector3 SampleInsidePoint(const ShapeField& field, Vector3 around, float searchRadius, unsigned int& rng) {
+    constexpr int kCandidates = 8;
+    constexpr int kGradientSteps = 4;
+
+    for (int i = 0; i < kCandidates; i++) {
+        Vector3 dir{ RandFloat(rng, -1.0f, 1.0f), RandFloat(rng, -1.0f, 1.0f), RandFloat(rng, -1.0f, 1.0f) };
+        if (Vector3LengthSqr(dir) < 0.0001f) dir = Vector3{ 0.0f, 1.0f, 0.0f }; // avoid a degenerate zero vector
+        dir = Vector3Normalize(dir);
+        Vector3 candidate = Vector3Add(around, Vector3Scale(dir, RandFloat(rng, 0.0f, searchRadius)));
+
+        for (int step = 0; step < kGradientSteps; step++) {
+            ShapeField::FieldSample s = field.SampleWorld(candidate);
+            if (s.distance < 0.0f) return candidate;
+            // gradient points toward increasing distance (outward), so
+            // stepping against it moves toward (and, with the small
+            // overshoot, past) the surface.
+            candidate = Vector3Subtract(candidate, Vector3Scale(s.gradient, s.distance + 0.05f));
+        }
+        if (field.SampleWorld(candidate).distance < 0.0f) return candidate;
+    }
+    return around;
+}
+
 } // namespace
 
-void LightningSystem::SpawnBolt(Vector3 origin, float strength, const ui::LightningSettings& s) {
+void LightningSystem::SpawnBolt(const ShapeField& field, float strength, const ui::LightningSettings& s) {
     strength = Clamp(strength, 0.0f, 1.0f);
 
     Bolt bolt;
 
-    float dirAngleXZ = RandFloat(rngState_, 0.0f, 2.0f * PI);
-    float dirElevation = RandFloat(rngState_, -0.4f, 0.9f); // biased upward/outward
-    float length = (s.lengthBase + RandFloat(rngState_, 0.0f, s.lengthJitter)) *
-                   (s.lengthStrengthBase + strength * s.lengthStrengthMult);
-
-    Vector3 dir = Vector3Normalize(Vector3{
-        std::cos(dirAngleXZ) * std::cos(dirElevation),
-        std::sin(dirElevation),
-        std::sin(dirAngleXZ) * std::cos(dirElevation)
-    });
-
-    Vector3 start = Vector3Add(origin, Vector3Scale(dir, 1.0f));
-    Vector3 end = Vector3Add(origin, Vector3Scale(dir, length));
+    // Both endpoints sampled from inside the real shape -- see
+    // SampleInsidePoint's comment -- rather than a fixed length extended
+    // in a random direction from a single origin, which routinely shot
+    // bolts out past the fog into empty space. The fractal path between
+    // two interior points automatically stays roughly contained and
+    // automatically scales to whatever shape/size is currently baked; no
+    // separate length knob needed.
+    Vector3 start = SampleInsidePoint(field, field.Center(), field.HalfExtent(), rngState_);
+    Vector3 end = SampleInsidePoint(field, field.Center(), field.HalfExtent(), rngState_);
 
     const int depth = s.fractalDepth;
     float displacement = s.displacementBase * (0.6f + strength * 0.6f);
@@ -82,14 +122,15 @@ void LightningSystem::SpawnBolt(Vector3 origin, float strength, const ui::Lightn
     for (int i = 0; i < branchCount && bolt.points.size() > 2; i++) {
         size_t startIdx = static_cast<size_t>(RandFloat(rngState_, 0.3f, 0.7f) * static_cast<float>(bolt.points.size() - 1));
         Vector3 branchStart = bolt.points[startIdx];
-        Vector3 randOffset{ RandFloat(rngState_, -1.0f, 1.0f), RandFloat(rngState_, -1.0f, 1.0f), RandFloat(rngState_, -1.0f, 1.0f) };
-        Vector3 branchDir = Vector3Normalize(Vector3Add(dir, randOffset));
-        Vector3 branchEnd = Vector3Add(branchStart, Vector3Scale(branchDir, length * 0.4f));
+        // Local search radius (a fraction of the shape's own extent) so
+        // branches read as short offshoots of the trunk, not independent
+        // bolts jumping to a random spot in the shape.
+        Vector3 branchEnd = SampleInsidePoint(field, branchStart, field.HalfExtent() * 0.4f, rngState_);
         bolt.branches.push_back(BuildFractalPath(branchStart, branchEnd, depth - 2, displacement * 0.6f, rngState_));
     }
 
-    // Electric blue-violet-cyan range, low saturation so it reads as
-    // bright near-white light rather than a flat colored line.
+    // Vivid, clearly colored (see LightningSettings::saturation's default)
+    // rather than near-white.
     float hue = std::fmod(s.hueBase + RandFloat(rngState_, s.hueJitterMin, s.hueJitterMax) + 360.0f, 360.0f);
     bolt.color = ColorFromHSV(hue, s.saturation, 1.0f);
     bolt.maxLife = s.lifeMin + RandFloat(rngState_, 0.0f, s.lifeJitter);
@@ -103,8 +144,8 @@ void LightningSystem::SpawnBolt(Vector3 origin, float strength, const ui::Lightn
     if (static_cast<int>(bolts_.size()) > s.maxBolts) bolts_.erase(bolts_.begin());
 }
 
-void LightningSystem::Update(float dt, Vector3 origin, bool trigger, float triggerStrength, const ui::LightningSettings& settings) {
-    if (trigger) SpawnBolt(origin, triggerStrength, settings);
+void LightningSystem::Update(float dt, const ShapeField& field, bool trigger, float triggerStrength, const ui::LightningSettings& settings) {
+    if (trigger) SpawnBolt(field, triggerStrength, settings);
 
     for (auto it = bolts_.begin(); it != bolts_.end();) {
         it->life -= dt;

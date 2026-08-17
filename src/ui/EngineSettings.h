@@ -25,14 +25,17 @@ struct FogEmissionSettings {
     // Sized for the SDF-biased-spawn design: since particles spawn already
     // on/near the shape surface rather than filling a diffuse volume, far
     // fewer are needed for a dense result than a naive approach would need.
-    int capacity = 600000;
+    // Pushed toward the high end (small+numerous over large+sparse -- see
+    // `size` below) for a denser, more volumetric look; tuned empirically
+    // against the actual uncapped framerate on the dev machine (see
+    // PerformanceSettings' vsync/targetFps defaults), not a guess.
+    int capacity = 2000000;
 
-    // particles/sec; steady-state alive count ~= rate * life. Scaled up
-    // from the old 9800 default to keep the same recruited/shed ratio at
-    // the new, higher capacity: core ~= 0.85*18000*30 ~= 459000, shed
-    // ~= 0.15*18000*6 ~= 16200, total ~= 475000 -- comfortably under the
-    // new default capacity.
-    float spawnRate = 18000.0f;
+    // particles/sec; steady-state alive count ~= rate * life. core ~=
+    // 0.85*55000*30 ~= 1,402,500, shed ~= 0.15*55000*6 ~= 49,500, total ~=
+    // 1,452,000 -- comfortably under the capacity above with headroom for
+    // Recruit Fraction/life tuning.
+    float spawnRate = 55000.0f;
 
     Vector3 velocity{ 0.0f, 0.08f, 0.0f };
     Vector3 velocityJitter{ 0.12f, 0.12f, 0.12f };
@@ -40,10 +43,12 @@ struct FogEmissionSettings {
     Color colorA{ 0, 0, 0, 255 };       // set to the code defaults in EngineSettings.cpp-free init below
     Color colorB{ 0, 0, 0, 255 };
 
-    // Finer/denser-reading at the higher default particle count above --
-    // 0.16 read as "video game particles" rather than realistic fog.
-    float size = 0.11f;
-    float sizeJitter = 0.07f;
+    // Small and numerous (see capacity/spawnRate above) reads as
+    // continuous volumetric fog; large and sparse reads as "video game
+    // particles" -- pushed near the slider's floor for the most
+    // realistic look the sprite-billboard approach can produce.
+    float size = 0.045f;
+    float sizeJitter = 0.02f;
 
     float life = 30.0f;                 // "core" life -- the population ShapeConform holds onto the shape
     float lifeJitter = 8.0f;
@@ -194,50 +199,82 @@ struct FogAttractionSettings {
 
 // -----------------------------------------------------------------------
 // Neon Fog: how this emitter's forces respond to music -- "destructive
-// but resisted": turbulence and one-shot kick impulses are audio-driven,
-// but nothing here ever touches Shape Attraction/Shape Curl/Morph Force
-// (FogForceSettings/ShapeSettings), so the silhouette always holds
-// against whatever the music throws at it, structurally rather than by
-// convention. Independent of ui::AudioSettings::enabled (which gates
-// whether audio exists at all this session) -- `reactive` lets this
-// emitter's own response be muted separately, e.g. for a future second
-// emitter that shouldn't react the same way.
+// but resisted": distinct musical features drive distinct existing
+// forces (Bass -> Gravity, Mid -> Shape Curl, Treble/Excitement ->
+// Turbulence), plus one-shot beat impacts, but nothing here ever touches
+// Shape Attraction/Morph Force/Recruit Fraction (FogForceSettings/
+// ShapeSettings/this struct's own recruit knobs live elsewhere), so the
+// silhouette always holds against whatever the music throws at it,
+// structurally rather than by convention. Gravity is safe to drive hard
+// because it's always been "loose containment, well below Shape
+// Attraction" by design; Shape Curl is safe because shape_conform.glsl
+// projects it tangential to the surface (it can never pull a particle
+// off the shape, only slide it along the shape it's already attracted
+// to). Independent of ui::AudioSettings::enabled (which gates whether
+// audio exists at all this session) -- `reactive` lets this emitter's
+// own response be muted separately, e.g. for a future second emitter
+// that shouldn't react the same way.
 // -----------------------------------------------------------------------
 struct FogAudioSettings {
     bool reactive = true;
 
-    // Added on top of Turbulence Strength (FogForceSettings) each frame --
-    // the base slider stays the resting/ambient value, audio adds to it,
-    // same pattern FogLightingSettings' hue/intensity fields already use.
-    float turbulenceEnergyScale = 1.5f;  // scaled by the smoothed Excitement envelope (slow, avoids jitter)
-    float turbulenceTrebleScale = 0.8f;  // scaled by instantaneous Treble -- the "fizzy" high-end response
-    float excitementSmoothing = 1.2f;    // seconds; low-pass time constant for the Energy -> Excitement envelope
+    // Shared low-pass time constant for Bass/Mid/Excitement (Treble stays
+    // raw/instantaneous -- the one deliberately fast, "sparkle" signal).
+    // Audio-band values are noisy frame-to-frame straight out of the FFT;
+    // smoothing keeps the forces they drive from looking twitchy.
+    float motionSmoothing = 0.6f;
 
-    // A hard beat gives the fog a one-shot outward kick (GpuParticleSystem::
-    // ApplyRadialImpulse) -- particles genuinely get knocked loose; recruited
-    // ones wobble and get pulled back by Shape Attraction, shed ones just
-    // fly off and despawn on schedule. Separate threshold from
-    // LightningSettings' own -- kicks and bolts don't have to agree on what
-    // counts as "hard."
+    // Each added on top of its target force (FogForceSettings) each frame
+    // -- the base slider stays the resting/ambient value, audio adds on
+    // top, same "base + audio scale" pattern FogLightingSettings' hue/
+    // intensity fields already use.
+    float bassGravityScale = 2.0f;       // Gravity Strength += smoothed Bass * this -- the mass pulses/breathes inward on bass swells
+    float midCurlScale = 2.5f;           // Shape Curl += smoothed Mid * this -- more surface flow/swirl on rhythmic/melodic content
+    float trebleTurbulenceScale = 0.8f;  // Turbulence Strength += instantaneous Treble * this -- fast, fizzy top-end response
+    float excitementTurbulenceScale = 1.5f; // Turbulence Strength += smoothed overall Energy * this -- ambient agitation floor
+
+    // A hard beat both (a) gives the existing mass a one-shot outward kick
+    // (GpuParticleSystem::ApplyRadialImpulse -- recruited particles wobble
+    // and get pulled back by Shape Attraction, shed ones fly off and
+    // despawn on schedule) and (b) emits a dedicated burst of guaranteed-
+    // unrecruited debris (see ShapeFogEmitter::EmitImpactBurst) so the hit
+    // unambiguously reads as particles being expelled, not just a subtle
+    // nudge to the ambient population. Separate threshold from
+    // LightningSettings' own -- kicks and bolts don't have to agree on
+    // what counts as "hard."
     float kickBeatThreshold = 0.5f;
-    float kickImpulseStrength = 2.5f;
-    float kickImpulseRadius = 3.0f;
+    float kickImpulseStrength = 3.0f;
+    float kickImpulseRadius = 3.5f;
     float kickCooldownSeconds = 0.12f;
+    int kickBurstCount = 400;
+    float kickBurstSpeed = 4.0f;
+    float kickBurstSpeedJitter = 2.0f;
+    float kickBurstLife = 1.2f;
+    float kickBurstLifeJitter = 0.4f;
 
     void Visit(IParamVisitor& v) {
         FogAudioSettings d;
         v.Bool(reactive, d.reactive, { "Reactive", "Whether this emitter's forces respond to music at all. Independent of the master Audio Enabled toggle." });
-        v.Float(turbulenceEnergyScale, d.turbulenceEnergyScale, 0.0f, 6.0f,
-            { "Turbulence x Excitement", "Turbulence Strength added per unit of the smoothed Excitement envelope (overall loudness/energy, slow-moving)." });
-        v.Float(turbulenceTrebleScale, d.turbulenceTrebleScale, 0.0f, 6.0f,
-            { "Turbulence x Treble", "Turbulence Strength added per unit of instantaneous Treble -- a faster, fizzier response than Excitement." });
-        v.Float(excitementSmoothing, d.excitementSmoothing, 0.1f, 5.0f,
-            { "Excitement Smoothing", "Seconds; how slowly the Excitement envelope follows raw audio Energy. Higher = calmer, slower-building reactivity." });
+        v.Float(motionSmoothing, d.motionSmoothing, 0.05f, 3.0f,
+            { "Motion Smoothing", "Seconds; how slowly Bass/Mid/Excitement's effect on forces follows raw audio (Treble stays instantaneous). Higher = calmer, slower-building reactivity." });
+        v.Float(bassGravityScale, d.bassGravityScale, 0.0f, 10.0f,
+            { "Gravity x Bass", "Gravity Strength added per unit of smoothed Bass -- the fog pulses/pulls inward on bass swells." });
+        v.Float(midCurlScale, d.midCurlScale, 0.0f, 10.0f,
+            { "Curl x Mid", "Shape Curl added per unit of smoothed Mid -- more surface flow/swirl. Tangential-only, so this can never pull particles off the shape." });
+        v.Float(trebleTurbulenceScale, d.trebleTurbulenceScale, 0.0f, 6.0f,
+            { "Turbulence x Treble", "Turbulence Strength added per unit of instantaneous Treble -- a fast, fizzy high-end response." });
+        v.Float(excitementTurbulenceScale, d.excitementTurbulenceScale, 0.0f, 6.0f,
+            { "Turbulence x Excitement", "Turbulence Strength added per unit of smoothed overall Energy -- a slow-moving ambient agitation floor." });
         v.Float(kickBeatThreshold, d.kickBeatThreshold, 0.0f, 1.0f,
-            { "Kick Beat Threshold", "Minimum beat intensity that fires an outward kick impulse." });
+            { "Kick Beat Threshold", "Minimum beat intensity that fires an outward kick impulse + debris burst." });
         v.Float(kickImpulseStrength, d.kickImpulseStrength, 0.0f, 15.0f, { "Kick Impulse Strength", "Outward velocity kick applied to particles near the field center on a hard beat." });
         v.Float(kickImpulseRadius, d.kickImpulseRadius, 0.5f, 15.0f, { "Kick Impulse Radius", "Radius around the field center the kick impulse affects." });
         v.Float(kickCooldownSeconds, d.kickCooldownSeconds, 0.0f, 2.0f, { "Kick Cooldown", "Minimum seconds between kick impulses, so a burst of rapid beats can't stack them." });
+        v.Int(kickBurstCount, d.kickBurstCount, 0, 5000, { "Kick Burst Count", "Particles emitted in the debris burst on a hard beat. 0 disables the burst (impulse-only kicks)." });
+        v.Float(kickBurstSpeed, d.kickBurstSpeed, 0.0f, 20.0f, { "Kick Burst Speed", "Minimum outward speed of debris burst particles." });
+        v.Float(kickBurstSpeedJitter, d.kickBurstSpeedJitter, 0.0f, 20.0f, { "Kick Burst Speed Jitter", "Random range added to Kick Burst Speed." });
+        v.Float(kickBurstLife, d.kickBurstLife, 0.1f, 5.0f, { "Kick Burst Life", "Lifetime of debris burst particles -- always short and unrecruited, so they fade and despawn rather than resettling on the shape." });
+        v.Float(kickBurstLifeJitter, d.kickBurstLifeJitter, 0.0f, 2.0f, { "Kick Burst Life Jitter", "Random range added to Kick Burst Life." });
     }
 };
 
@@ -299,10 +336,14 @@ struct LightningSettings {
     int fractalDepth = 5;
     float displacementBase = 1.2f;
 
-    float lengthBase = 4.0f;
-    float lengthJitter = 4.0f;
-    float lengthStrengthBase = 0.6f;
-    float lengthStrengthMult = 0.8f;
+    // Bolt endpoints are rejection-sampled from inside the shape's real
+    // baked SDF (see LightningSystem::SampleInsidePoint) rather than
+    // extended a fixed length in a random direction -- so bolt "length"
+    // is however far apart two interior points happen to be, and
+    // automatically scales with whatever shape is currently baked. No
+    // separate length knob needed (an earlier fixed-length-in-a-random-
+    // direction version routinely shot bolts out past the fog into empty
+    // space, which is what this replaced).
 
     int branchCountMin = 1;
     int branchCountMax = 3;
@@ -310,7 +351,7 @@ struct LightningSettings {
     float hueBase = 200.0f;
     float hueJitterMin = -20.0f;
     float hueJitterMax = 40.0f;
-    float saturation = 0.35f;
+    float saturation = 0.8f; // vividly colored, not near-white -- see the Visit() tooltip
 
     float lifeMin = 0.12f;
     float lifeJitter = 0.08f;
@@ -329,16 +370,12 @@ struct LightningSettings {
         v.Int(maxBolts, d.maxBolts, 1, 24, { "Max Concurrent Bolts", "Caps live bolts so a beat burst can't run away the draw call count." });
         v.Int(fractalDepth, d.fractalDepth, 1, 8, { "Fractal Depth", "Midpoint-displacement subdivision levels. Higher = more jagged detail, more segments to draw." });
         v.Float(displacementBase, d.displacementBase, 0.0f, 5.0f, { "Displacement", "Base perpendicular offset for the fractal path, halved each subdivision level." });
-        v.Float(lengthBase, d.lengthBase, 0.5f, 20.0f, { "Length Base", "Minimum bolt length before strength scaling." });
-        v.Float(lengthJitter, d.lengthJitter, 0.0f, 20.0f, { "Length Jitter", "Random range added to Length Base." });
-        v.Float(lengthStrengthBase, d.lengthStrengthBase, 0.0f, 2.0f, { "Length x Strength Base", "Length multiplier at zero trigger strength." });
-        v.Float(lengthStrengthMult, d.lengthStrengthMult, 0.0f, 2.0f, { "Length x Strength Scale", "Additional length multiplier scaled by trigger strength (beat intensity + treble)." });
         v.Int(branchCountMin, d.branchCountMin, 0, 10, { "Branch Count Min", "Minimum side-branches per bolt." });
         v.Int(branchCountMax, d.branchCountMax, 0, 10, { "Branch Count Max", "Maximum side-branches per bolt." });
         v.Float(hueBase, d.hueBase, 0.0f, 360.0f, { "Hue Base", "Bolt hue (degrees) before random jitter." });
         v.Float(hueJitterMin, d.hueJitterMin, -180.0f, 180.0f, { "Hue Jitter Min", "Lower bound of random hue offset." });
         v.Float(hueJitterMax, d.hueJitterMax, -180.0f, 180.0f, { "Hue Jitter Max", "Upper bound of random hue offset." });
-        v.Float(saturation, d.saturation, 0.0f, 1.0f, { "Saturation", "Kept low by design so bolts read as bright near-white light, not a flat colored line." });
+        v.Float(saturation, d.saturation, 0.0f, 1.0f, { "Saturation", "Bolt color saturation -- kept high by default so bolts read as clearly colored jagged lightning, not near-white light." });
         v.Float(lifeMin, d.lifeMin, 0.02f, 1.0f, { "Life Min", "Minimum bolt lifetime, seconds." });
         v.Float(lifeJitter, d.lifeJitter, 0.0f, 0.5f, { "Life Jitter", "Random range added to Life Min." });
         v.Float(brightnessBase, d.brightnessBase, 0.0f, 10.0f, { "Brightness Base", "Light-sample brightness at zero trigger strength." });
@@ -406,8 +443,8 @@ struct PostSettings {
 // only when a value actually changes -- see App::ApplyPerformanceSettings.
 // -----------------------------------------------------------------------
 struct PerformanceSettings {
-    bool vsync = true;
-    int targetFps = 60;   // 0 = uncapped -- lets you see the true achievable framerate
+    bool vsync = false;   // off by default -- see targetFps
+    int targetFps = 0;    // 0 = uncapped -- lets you see the true achievable framerate
 
     void Visit(IParamVisitor& v) {
         PerformanceSettings d;
