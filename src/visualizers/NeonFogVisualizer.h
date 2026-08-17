@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <memory>
 #include "Visualizer.h"
 #include "ShapeFogEmitter.h"
@@ -76,7 +77,6 @@ public:
     const char* Name() const override { return "Neon Fog"; }
     int ParticleCount() const override { return fog_.AliveCountApprox(); }
 
-    const char* ExtraStatusLine() const override;
     const char* DebugInfoText() const override;
     void SecondaryAction() override { CycleShapePreset(); } // bound to a dedicated key in App
     void TertiaryAction() override { shapeSettings_.autoCycle = !shapeSettings_.autoCycle; } // bound to 'M' in App
@@ -105,6 +105,7 @@ private:
     // attraction settings live on fog_ itself (see ShapeFogEmitter.h).
     ui::ShapeSettings shapeSettings_;
     ui::FogLightingSettings lightingSettings_;
+    ui::FogColorSettings colorSettings_;
     ui::LightningSettings lightningSettings_;
     VoidFloor::Params floorParams_;
     // Seeds floorParams_'s starting look once, the first time Init() runs
@@ -139,4 +140,18 @@ private:
     // comment on why lighting, not particle albedo, carries the color.
     Color coreLightColor_ = WHITE;
     float coreLightIntensity_ = 0.0f;
+
+    // Up to three extra lights, one per band (bass/mid/treble), computed
+    // in Update() from colorSettings_'s Spectral Lights group and read in
+    // Draw() (const) alongside coreLightColor_/coreLightIntensity_ above --
+    // see FogColorSettings' class comment. spectralLightCount_ is 0 when
+    // Enabled is off, so Draw()'s light array fill is a no-op either way.
+    std::array<LightSample, 3> spectralLights_{};
+    int spectralLightCount_ = 0;
+
+    // colorSettings_.paletteHueA/B plus this frame's audio shift/spread --
+    // see Update()'s comment. Draw() (const) reads these instead of
+    // colorSettings_'s static fields directly.
+    float paletteHueA_ = 0.0f;
+    float paletteHueB_ = 0.0f;
 };

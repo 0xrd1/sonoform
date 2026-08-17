@@ -55,6 +55,21 @@ public:
     bool BeatTriggered() const;
     float BeatIntensity() const;
 
+    // Normalized companions to Bass()/Mid()/Treble()/Energy() above, each
+    // in [0,1] -- those raw band averages are un-normalized FFT magnitudes
+    // (typically 0.0-0.15), which is why a hand-tuned "hue += Bass() * 15"
+    // style scale barely moves anything: the raw value is too small for
+    // its own scale to matter. These divide by a per-band rolling peak
+    // (a decaying max, not a fixed calibration constant) instead, so a
+    // loud passage in *this* track reads as ~1.0 regardless of the track's
+    // absolute loudness or mix. Existing callers of the raw getters above
+    // are deliberately untouched -- only new audio-reactive color code
+    // consumes these.
+    float BassLevel() const;
+    float MidLevel() const;
+    float TrebleLevel() const;
+    float EnergyLevel() const;
+
 private:
     static void AudioCallback(void* buffer, unsigned int frames);
     void ProcessCallback(const float* buffer, unsigned int frames);
@@ -88,9 +103,19 @@ private:
         float bass = 0.0f, mid = 0.0f, treble = 0.0f, energy = 0.0f;
         bool beatTriggered = false;
         float beatIntensity = 0.0f;
+        // Rolling-peak-normalized companions -- see BassLevel() etc.'s
+        // comment in the header for why these exist alongside the raw
+        // fields above rather than replacing them.
+        float bassLevel = 0.0f, midLevel = 0.0f, trebleLevel = 0.0f, energyLevel = 0.0f;
     };
     mutable std::mutex snapshotMutex_;
     AudioSnapshot snapshot_;
+
+    // Decaying peak trackers for the normalization above -- one per band,
+    // time-based decay (not a fixed sample window) for the same reason
+    // avgBassEnergy_'s lag below is time-based: Update()'s calling cadence
+    // is a dedicated ~120Hz thread, not tied to the render frame rate.
+    float bassPeak_ = 0.0f, midPeak_ = 0.0f, treblePeak_ = 0.0f, energyPeak_ = 0.0f;
 
     // Rolling bass average the beat detector compares against, and how
     // long Update() has been running -- both time-based (a first-order

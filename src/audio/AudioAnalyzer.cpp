@@ -88,6 +88,22 @@ float AudioAnalyzer::BeatIntensity() const {
     std::lock_guard<std::mutex> lock(snapshotMutex_);
     return snapshot_.beatIntensity;
 }
+float AudioAnalyzer::BassLevel() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.bassLevel;
+}
+float AudioAnalyzer::MidLevel() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.midLevel;
+}
+float AudioAnalyzer::TrebleLevel() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.trebleLevel;
+}
+float AudioAnalyzer::EnergyLevel() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return snapshot_.energyLevel;
+}
 
 void AudioAnalyzer::Update() {
     std::array<float, kFFTSize> samples{};
@@ -186,6 +202,26 @@ void AudioAnalyzer::Update() {
     avgBassEnergy_ += (bass - avgBassEnergy_) * std::min(1.0f, dt / kAvgTimeConstant);
     warmupElapsed_ += dt;
 
+    // Rolling-peak normalization -- see BassLevel() etc.'s header comment.
+    // Each band's peak decays linearly toward the current raw value at a
+    // fixed rate/sec (so a sudden loud passage is tracked almost
+    // immediately -- max() lets it jump straight up -- while a quiet
+    // stretch afterward doesn't leave `level` pinned near 0 forever: the
+    // peak itself relaxes back down over a couple seconds, the same
+    // "auto gain control" shape a VU meter uses). kPeakFloor keeps the
+    // divide well-defined during true silence (bass/etc. == 0) instead of
+    // level flickering on FP noise near zero.
+    constexpr float kPeakDecayPerSecond = 0.4f;
+    constexpr float kPeakFloor = 0.02f;
+    auto updateLevel = [&](float raw, float& peak) {
+        peak = std::max(raw, peak - kPeakDecayPerSecond * dt);
+        return std::clamp(raw / std::max(peak, kPeakFloor), 0.0f, 1.0f);
+    };
+    float bassLevel = updateLevel(bass, bassPeak_);
+    float midLevel = updateLevel(mid, midPeak_);
+    float trebleLevel = updateLevel(treble, treblePeak_);
+    float energyLevel = updateLevel(energy, energyPeak_);
+
     beatCooldown_ = std::max(0.0f, beatCooldown_ - dt);
 
     bool beatTriggered = false;
@@ -209,5 +245,9 @@ void AudioAnalyzer::Update() {
         snapshot_.energy = energy;
         snapshot_.beatTriggered = beatTriggered;
         snapshot_.beatIntensity = beatIntensity;
+        snapshot_.bassLevel = bassLevel;
+        snapshot_.midLevel = midLevel;
+        snapshot_.trebleLevel = trebleLevel;
+        snapshot_.energyLevel = energyLevel;
     }
 }

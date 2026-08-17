@@ -4,6 +4,7 @@
 #include "GpuBuffer.h"
 #include "ParticleTypes.h"
 #include "LightSample.h"
+#include "PaletteParams.h"
 
 class ShaderLibrary;
 class ParticleRenderer;
@@ -135,7 +136,8 @@ public:
     void Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode = 0, float sizeScale = 1.0f,
               const LightSample* lights = nullptr, int lightCount = 0,
-              float time = 0.0f, int spriteStyle = 1) const;
+              float time = 0.0f, int spriteStyle = 1,
+              const PaletteParams& palette = PaletteParams{}) const;
 
     int Capacity() const { return capacity_; }
 

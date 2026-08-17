@@ -15,8 +15,33 @@ namespace ui {
 
 namespace {
 
-constexpr const char* kPresetsDir = "settings/presets";
-constexpr const char* kDefaultPath = "settings/default.ini";
+// Repo-root, not "settings/" -- presets are tuned looks worth keeping and
+// sharing, not machine-local runtime state (contrast PerformanceSettings/
+// AudioSettings just above, which stay out of the round-trip entirely for
+// the opposite reason).
+//
+// Resolved from GetApplicationDirectory() (the executable's own directory)
+// rather than a CWD-relative literal: the old "settings/presets" path had
+// exactly this problem (documented in the pre-existing settings/ .gitignore
+// comment) -- CWD is build/ when the built exe is launched directly, but
+// the repo root under the VS debugger (VS_DEBUGGER_WORKING_DIRECTORY, see
+// CMakeLists.txt), so a CWD-relative path silently split into two
+// divergent preset directories depending on how you ran it. The build
+// output always sits one level under the repo root (CMakeLists.txt's
+// add_executable target lands at <root>/build/<exe>), so
+// GetApplicationDirectory() + "../presets" reaches the one repo-tracked
+// presets/ directory regardless of launch method. Cached in a static local
+// -- ListPresets() re-scans this path every frame the panel is open (see
+// its own call site below), so this avoids a GetApplicationDirectory() call
+// on every one of those frames too.
+const std::string& PresetsDir() {
+    static const std::string dir = std::string(GetApplicationDirectory()) + "../presets";
+    return dir;
+}
+const std::string& DefaultPresetPath() {
+    static const std::string path = PresetsDir() + "/default.ini";
+    return path;
+}
 
 // Both windows default to the right edge of the screen, stacked downward
 // (see the plan's "growing down" ask) -- FirstUseEver only, so this is a
@@ -127,8 +152,8 @@ void DrawDebugPanel(PanelState& state) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "Turns on the audio device, track playback, and every audio-reactive visual "
-                "(lighting, turbulence, kick impulses). Off by default -- silent, no audio "
-                "device initialized.");
+                "(lighting, turbulence, kick impulses). On by default -- this is a music "
+                "visualizer.");
         }
         ImGui::SliderFloat("Volume", &state.audio->volume, 0.0f, 1.0f);
 
@@ -214,28 +239,28 @@ void DrawDebugPanel(PanelState& state) {
     ImGui::InputText("Name", nameBuf, sizeof(nameBuf));
 
     if (ImGui::Button("Save As")) {
-        std::string path = std::string(kPresetsDir) + "/" + nameBuf + ".ini";
+        std::string path = PresetsDir() + "/" + nameBuf + ".ini";
         SaveSettings(path, [&](IParamVisitor& v) { VisitAll(state, v); });
     }
     ImGui::SameLine();
     if (ImGui::Button("Save As Default")) {
-        SaveSettings(kDefaultPath, [&](IParamVisitor& v) { VisitAll(state, v); });
+        SaveSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
     }
     ImGui::SameLine();
     if (ImGui::Button("Load Default")) {
-        LoadSettings(kDefaultPath, [&](IParamVisitor& v) { VisitAll(state, v); });
+        LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
     }
 
-    for (const std::string& name : ListPresets(kPresetsDir)) {
+    for (const std::string& name : ListPresets(PresetsDir())) {
         ImGui::PushID(name.c_str());
         ImGui::BulletText("%s", name.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Load")) {
-            LoadSettings(std::string(kPresetsDir) + "/" + name + ".ini", [&](IParamVisitor& v) { VisitAll(state, v); });
+            LoadSettings(PresetsDir() + "/" + name + ".ini", [&](IParamVisitor& v) { VisitAll(state, v); });
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Delete")) {
-            DeletePreset(kPresetsDir, name);
+            DeletePreset(PresetsDir(), name);
         }
         ImGui::PopID();
     }
@@ -280,7 +305,7 @@ void DrawDebugWindow(PanelState& state) {
 
 bool LoadDefaultSettings(PanelState& state) {
     if (state.visualizers == nullptr || state.camera == nullptr || state.post == nullptr) return false;
-    return LoadSettings(kDefaultPath, [&](IParamVisitor& v) { VisitAll(state, v); });
+    return LoadSettings(DefaultPresetPath(), [&](IParamVisitor& v) { VisitAll(state, v); });
 }
 
 } // namespace ui

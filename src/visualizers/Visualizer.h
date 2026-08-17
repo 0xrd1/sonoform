@@ -63,10 +63,6 @@ public:
     // per-frame count. See GpuParticleSystem::AliveCountApprox.
     virtual int ParticleCount() const = 0;
 
-    // Optional single extra HUD line (e.g. Neon Fog's current shape
-    // preset). Return nullptr (the default) to show nothing.
-    virtual const char* ExtraStatusLine() const { return nullptr; }
-
     // Optional multi-line numeric readout for the Debug View window (see
     // src/ui/EngineUi.h's DrawDebugWindow) -- for precise values (grid
     // resolution, voxel size, field center, current light color/intensity)

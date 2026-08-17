@@ -98,16 +98,58 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
 
     // The core light: the fog's *only* real light source now (see Draw()
     // -- the overhead position no longer contributes to lightBoost), so
-    // this is what "glowing from within" actually means: everything the
-    // fog's color does comes from here. Bass/treble nudge its hue within
-    // the cool cyan-blue family (Tron Legacy palette, not the earlier
-    // violet).
-    float coreHue = lightingSettings_.coreHueBase + frame.audio.Bass() * lightingSettings_.coreHueBassScale +
-                     frame.audio.Treble() * lightingSettings_.coreHueTrebleScale +
-                     frame.time * lightingSettings_.hueCycleSpeed;
-    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), lightingSettings_.coreSaturation, lightingSettings_.coreValue);
+    // this is what "glowing from within" actually means. Hue is driven by
+    // AudioAnalyzer's normalized *Level() getters (each [0,1] against the
+    // track's own recent peak), not the raw Bass()/Mid()/Treble() -- those
+    // are un-normalized FFT magnitudes far too small (~0.0-0.15) for a
+    // hand-tuned degree scale to move visibly, which is the root cause of
+    // the old "hue just rotates" behavior (see hueCycleSpeed's comment in
+    // EngineSettings.h). Mid is folded in here via colorSettings_ rather
+    // than FogLightingSettings, since the core light's own struct predates
+    // the color-reactivity pass -- see FogColorSettings' class comment.
+    float coreHue = lightingSettings_.coreHueBase
+                   + frame.audio.BassLevel() * lightingSettings_.coreHueBassScale
+                   + frame.audio.TrebleLevel() * lightingSettings_.coreHueTrebleScale
+                   + frame.audio.MidLevel() * colorSettings_.hueMidScale
+                   + frame.time * lightingSettings_.hueCycleSpeed;
+    float coreSat = Clamp(lightingSettings_.coreSaturation + frame.audio.EnergyLevel() * colorSettings_.saturationEnergyScale, 0.0f, 1.0f);
+    float coreVal = Clamp(lightingSettings_.coreValue + frame.audio.EnergyLevel() * colorSettings_.valueEnergyScale, 0.0f, 1.0f);
+    coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), coreSat, coreVal);
     coreLightIntensity_ = (lightingSettings_.intensityBase + frame.audio.Energy() * lightingSettings_.intensityEnergyScale +
                             beatFlash_ * lightingSettings_.intensityBeatFlashScale) * frame.intensity;
+
+    // Spectral lights: up to three extra LightSample entries, one per band,
+    // positioned near the field center and colored/sized by that band's
+    // own level -- see FogColorSettings' class comment on why this is what
+    // makes color read as *localized*, not just a single scene-wide hue.
+    // Center is shapeField_->Center() (the authoritative, possibly-just-
+    // rebaked position), same reasoning as the core light's own position
+    // in Draw() below.
+    spectralLightCount_ = 0;
+    if (colorSettings_.spectralEnabled) {
+        Vector3 center = shapeField_->Center();
+        float r = colorSettings_.spectralRadius;
+        float sat = colorSettings_.spectralSaturation;
+        float scale = colorSettings_.spectralIntensity * frame.intensity;
+        spectralLights_[0] = LightSample{ center + Vector3{ 0.0f, -r, 0.0f },
+            frame.audio.BassLevel() * scale, ColorFromHSV(colorSettings_.spectralHueBass, sat, 1.0f) };
+        spectralLights_[1] = LightSample{ center + Vector3{ r, 0.0f, 0.0f },
+            frame.audio.MidLevel() * scale, ColorFromHSV(colorSettings_.spectralHueMid, sat, 1.0f) };
+        spectralLights_[2] = LightSample{ center + Vector3{ 0.0f, r, 0.0f },
+            frame.audio.TrebleLevel() * scale, ColorFromHSV(colorSettings_.spectralHueTreble, sat, 1.0f) };
+        spectralLightCount_ = 3;
+    }
+
+    // Palette hue ramp, audio-shifted here (not in Draw(), which is const
+    // and has no FrameContext of its own -- same reason coreLightColor_/
+    // spectralLights_ above are computed here and just read in Draw()).
+    // Shift rotates the whole ramp together; Spread widens B away from A
+    // -- both additive on top of the panel's static Hue A/B, so 0 audio
+    // reproduces exactly the static ramp the panel shows.
+    float shift = frame.audio.EnergyLevel() * colorSettings_.paletteAudioShift;
+    float spread = frame.audio.TrebleLevel() * colorSettings_.paletteAudioSpread;
+    paletteHueA_ = colorSettings_.paletteHueA + shift;
+    paletteHueB_ = colorSettings_.paletteHueB + shift + spread;
 
     // Delegates forces/shading/emission/sim-update to the emitter itself --
     // see ShapeFogEmitter::Update for the SDF-biased-spawn and recruited/
@@ -185,7 +227,15 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // path.
     std::array<LightSample, kMaxParticleLights> lights{};
     lights[0] = LightSample{ shapeField_->Center(), coreLightIntensity_, coreLightColor_ };
-    int lightCount = 1 + lightning_.GatherLights(lights.data() + 1, kMaxParticleLights - 1);
+    int lightCount = 1;
+    // Spectral lights (see Update()'s comment) fill the next slots, ahead
+    // of lightning -- lightning is transient/rare (only on hard beats) and
+    // its own GatherLights already caps at whatever room is left, so it
+    // can never be starved into zero by these three.
+    for (int i = 0; i < spectralLightCount_ && lightCount < kMaxParticleLights; i++) {
+        lights[static_cast<size_t>(lightCount++)] = spectralLights_[static_cast<size_t>(i)];
+    }
+    lightCount += lightning_.GatherLights(lights.data() + lightCount, kMaxParticleLights - lightCount);
 
     // Standard alpha blending, not additive: the fog is meant to read as
     // a gas being lit, not a self-luminous energy cloud -- see the class
@@ -198,7 +248,21 @@ void NeonFogVisualizer::Draw(const RenderContext& ctx) const {
     // fadeMode/sizeScale are fixed inside ShapeFogEmitter::Draw -- see its
     // own comment on why neither has needed to vary per-call.
     int spriteStyle = (ctx.debug != nullptr && ctx.debug->disableSpriteNoise) ? 0 : 1;
-    fog_.Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, lights.data(), lightCount, lastTime_, spriteStyle);
+
+    // See gfx/PaletteParams.h -- palette.mode == Off (colorSettings_.paletteMode
+    // defaults to 0) is an exact no-op all the way down to the shader, so
+    // this is always safe to build and pass unconditionally.
+    PaletteParams palette;
+    palette.mode = static_cast<PaletteMode>(colorSettings_.paletteMode);
+    palette.center = shapeField_->Center();
+    palette.extent = shapeField_->HalfExtent();
+    palette.hueA = paletteHueA_;
+    palette.hueB = paletteHueB_;
+    palette.saturation = colorSettings_.paletteSaturation;
+    palette.strength = colorSettings_.paletteStrength;
+    palette.lightTint = colorSettings_.paletteLightTint;
+
+    fog_.Draw(ctx.viewProj, ctx.cameraRight, ctx.cameraUp, lights.data(), lightCount, lastTime_, spriteStyle, palette);
     EndBlendMode();
 
     // Lightning bolts are genuinely light-emitting, so additive is the
@@ -336,29 +400,26 @@ const char* ShapeName(ProceduralShapeType type) {
 }
 }
 
-const char* NeonFogVisualizer::ExtraStatusLine() const {
-    float secondsToNext = shapeSettings_.autoCycle ? std::max(0.0f, shapeSettings_.cycleSeconds - shapeTimer_) : 0.0f;
-    return TextFormat(
-        "Shape: %s (S to cycle)  Morph force: %.2f (-/=)  Morph: %.0f%%  Auto-cycle: %s (M)%s",
-        ShapeName(shapeProvider_->Type()), shapeSettings_.morphForce, morphStrength_ * 100.0f,
-        shapeSettings_.autoCycle ? "on" : "off",
-        shapeSettings_.autoCycle ? TextFormat("  Next in: %.1fs", secondsToNext) : "");
-}
-
 const char* NeonFogVisualizer::DebugInfoText() const {
     if (!shapeField_) return nullptr;
     Vector3 c = shapeField_->Center();
     float halfExtent = shapeField_->HalfExtent();
     int res = shapeField_->Resolution();
     float voxelSize = (halfExtent * 2.0f) / static_cast<float>(res);
+    // Auto-cycle countdown folded in here (was the ImGui-redundant HUD's
+    // ExtraStatusLine, since deleted -- see Visualizer.h) -- it's the one
+    // value this window doesn't already show elsewhere via the Shape panel
+    // group's own Auto-Cycle/Cycle Seconds fields.
+    float secondsToNext = shapeSettings_.autoCycle ? std::max(0.0f, shapeSettings_.cycleSeconds - shapeTimer_) : 0.0f;
     return TextFormat(
         "Grid: %dx%dx%d over %.1f world units (voxel %.3f)\n"
         "Field Center: (%.2f, %.2f, %.2f)\n"
-        "Shape: %s  Morph: %.0f%%\n"
+        "Shape: %s  Morph: %.0f%%%s\n"
         "Core Light: (%d,%d,%d) x %.2f",
         res, res, res, halfExtent * 2.0f, voxelSize,
         c.x, c.y, c.z,
         ShapeName(shapeProvider_->Type()), morphStrength_ * 100.0f,
+        shapeSettings_.autoCycle ? TextFormat("  Next shape in: %.1fs", secondsToNext) : "",
         coreLightColor_.r, coreLightColor_.g, coreLightColor_.b, coreLightIntensity_);
 }
 
@@ -397,6 +458,7 @@ void NeonFogVisualizer::VisitSettings(ui::IParamVisitor& v) {
 
     v.BeginGroup("Lighting");
     lightingSettings_.Visit(v);
+    colorSettings_.Visit(v); // opens its own "Color" sub-group -- see FogColorSettings::Visit
     v.EndGroup();
 
     v.BeginGroup("Lightning");

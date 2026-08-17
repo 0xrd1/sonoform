@@ -1,6 +1,7 @@
 #pragma once
 #include "ParamVisitor.h"
 #include "VoidFloor.h"
+#include "PaletteParams.h"
 
 // The settings structs behind the runtime editor: every value that used to
 // live as a `constexpr` in an anonymous namespace, an unlabeled member, or a
@@ -287,7 +288,15 @@ struct FogLightingSettings {
     float coreHueBase = 200.0f;
     float coreHueBassScale = -15.0f;
     float coreHueTrebleScale = 20.0f;
-    float hueCycleSpeed = 8.0f;         // degrees/sec of continuous drift; a full 360 deg cycle every 45s
+    // Was 8.0 (a full 360 deg cycle every 45s) -- at that speed the
+    // unbounded time*speed term swamps coreHueBassScale/coreHueTrebleScale
+    // (a handful of degrees each) so completely that the fog reads as
+    // "hue just rotates", not audio-reactive at all. Defaulted to 0 (opt-in
+    // via the panel) now that coreHueBassScale/coreHueTrebleScale multiply
+    // AudioAnalyzer's normalized *Level() getters instead of raw band
+    // magnitudes (see FogColorSettings' own comment below) and can
+    // actually compete for the hue on their own.
+    float hueCycleSpeed = 0.0f;         // degrees/sec of continuous drift; 0 = audio owns the hue entirely
     float coreSaturation = 0.75f;
     float coreValue = 1.0f;
 
@@ -303,9 +312,9 @@ struct FogLightingSettings {
         FogLightingSettings d;
         v.BeginGroup("Core Light Color");
         v.Float(coreHueBase, d.coreHueBase, 0.0f, 360.0f, { "Hue Base", "Core light hue (degrees) at rest." });
-        v.Float(coreHueBassScale, d.coreHueBassScale, -60.0f, 60.0f, { "Hue x Bass", "Hue shift per unit of bass energy." });
-        v.Float(coreHueTrebleScale, d.coreHueTrebleScale, -60.0f, 60.0f, { "Hue x Treble", "Hue shift per unit of treble energy." });
-        v.Float(hueCycleSpeed, d.hueCycleSpeed, 0.0f, 90.0f, { "Hue Cycle Speed", "Continuous hue drift, degrees/sec -- slow ambient color cycling. 0 disables it." });
+        v.Float(coreHueBassScale, d.coreHueBassScale, -60.0f, 60.0f, { "Hue x Bass", "Hue shift (degrees) at full-scale bass -- multiplies AudioAnalyzer::BassLevel(), which is normalized to [0,1] against the track's own recent peak, not the raw FFT magnitude." });
+        v.Float(coreHueTrebleScale, d.coreHueTrebleScale, -60.0f, 60.0f, { "Hue x Treble", "Hue shift (degrees) at full-scale treble -- multiplies AudioAnalyzer::TrebleLevel(), normalized the same way as Hue x Bass." });
+        v.Float(hueCycleSpeed, d.hueCycleSpeed, 0.0f, 90.0f, { "Hue Cycle Speed", "Continuous hue drift, degrees/sec -- slow ambient color cycling layered on top of the audio-driven hue. 0 (the default) leaves the hue entirely to the music." });
         v.Float(coreSaturation, d.coreSaturation, 0.0f, 1.0f, { "Saturation", "Core light saturation. Lower reads as white-hot; higher as vividly colored." });
         v.Float(coreValue, d.coreValue, 0.0f, 1.0f, { "Value", "Core light HSV value." });
         v.EndGroup();
@@ -320,6 +329,107 @@ struct FogLightingSettings {
             { "Overhead Light Position", "Angle used for the fake self-shadow and the floor's light-pool hint only -- deliberately never added as a real particle light (see the class comment on why the fog should read as lit from within)." });
         v.Float(shadeAmbientFloor, d.shadeAmbientFloor, 0.0f, 1.0f,
             { "Shade Ambient Floor", "How dim the self-shadowed side gets. 1.0 = no darkening; kept high by design so it reads as gentle form, not an external key light." });
+        v.EndGroup();
+    }
+};
+
+// -----------------------------------------------------------------------
+// Neon Fog: everything that makes color actually vary with the music and
+// across the fog's own volume, on top of FogLightingSettings' single core-
+// light hue above. Three independent mechanisms, addressing three separate
+// gaps a first pass at "the color just rotates" surfaced:
+//   - Spectral lights: up to three extra LightSample entries (see
+//     NeonFogVisualizer::Update/Draw), one per band, each positioned near
+//     the field center and colored/sized by that band's own AudioAnalyzer::
+//     *Level(). Pure C++, no shader change -- the 16-slot light array and
+//     particle_render.vert's light-boost loop already exist and only slot
+//     0 (the core light) was ever filled. This is what makes color
+//     visually *localized* to where a frequency's energy is, not just a
+//     single scene-wide hue.
+//   - Palette: a per-particle tint sampled live from world position each
+//     frame in particle_render.vert (see gfx/PaletteParams.h) -- what
+//     makes color vary *across the body itself* (rim vs. core, top vs.
+//     bottom, around the ring), which no light-based approach can do no
+//     matter how many lights are added, since a light's color is uniform
+//     across every particle it reaches.
+//   - paletteAudioShift/Spread let the palette itself breathe with the
+//     music (the whole hue ramp rotates and widens) without needing a
+//     second copy of the spectral-light machinery.
+// All three read AudioAnalyzer's normalized *Level() getters (see its
+// header comment), not the raw Bass()/Mid()/Treble()/Energy() -- those are
+// un-normalized FFT magnitudes (typically 0.0-0.15), which is the actual
+// root cause "color just rotates" traced back to: a scale of even 20-30
+// against a ~0.05 raw value moves nothing, so anything wired to the raw
+// getters silently reads as static regardless of how it's tuned.
+// -----------------------------------------------------------------------
+struct FogColorSettings {
+    // Added on top of FogLightingSettings' own coreHueBassScale/
+    // coreHueTrebleScale (this struct doesn't touch the core light's hue
+    // math directly -- see NeonFogVisualizer::Update) via Mid, which the
+    // core light alone never responded to.
+    float hueMidScale = 20.0f;           // degrees at full-scale MidLevel()
+    float saturationEnergyScale = 0.15f; // core saturation += EnergyLevel() * this
+    float valueEnergyScale = 0.0f;       // core value += EnergyLevel() * this (0 = value stays constant; intensity already carries loudness)
+
+    bool spectralEnabled = true;
+    float spectralHueBass = 210.0f;      // deep blue -- low, near the floor
+    float spectralHueMid = 160.0f;       // teal -- lateral
+    float spectralHueTreble = 60.0f;     // warm gold -- high, sparkling accent
+    float spectralRadius = 3.0f;         // offset distance from field center, world units
+    float spectralIntensity = 6.0f;      // scales *Level() (already [0,1]) to a light-intensity range comparable to the core light
+    float spectralSaturation = 0.85f;
+
+    int paletteMode = 0;                 // indexes PaletteModeNames() below; 0 = Off
+    float paletteHueA = 190.0f;
+    float paletteHueB = 320.0f;
+    float paletteSaturation = 0.7f;
+    float paletteStrength = 0.0f;        // 0 = today's untinted look; the panel/presets opt in
+    float paletteLightTint = 0.0f;       // see PaletteParams::lightTint's comment on why this exists separately from paletteStrength
+    float paletteAudioShift = 0.0f;      // degrees; rotates hueA/hueB together, scaled by EnergyLevel()
+    float paletteAudioSpread = 0.0f;     // degrees; widens hueB away from hueA, scaled by TrebleLevel()
+
+    static const char* const* PaletteModeNames() {
+        static const char* names[] = { "Off", "Height", "Radius", "Angle", "Random" };
+        return names;
+    }
+    static constexpr int kPaletteModeCount = 5;
+
+    void Visit(IParamVisitor& v) {
+        FogColorSettings d;
+        v.BeginGroup("Color");
+        v.Float(hueMidScale, d.hueMidScale, -60.0f, 60.0f,
+            { "Hue x Mid", "Core light hue shift (degrees) at full-scale MidLevel() -- the one band the core light's own hue math (Bass/Treble, see Lighting/Core Light Color) doesn't already cover." });
+        v.Float(saturationEnergyScale, d.saturationEnergyScale, -1.0f, 1.0f,
+            { "Saturation x Energy", "Core light saturation added per unit of EnergyLevel() -- louder passages read as more vividly colored, quieter ones drift toward white." });
+        v.Float(valueEnergyScale, d.valueEnergyScale, -1.0f, 1.0f,
+            { "Value x Energy", "Core light HSV value added per unit of EnergyLevel(). Usually left at 0 -- Core Light Intensity already carries loudness; this would double up on top of it." });
+        v.EndGroup();
+
+        v.BeginGroup("Spectral Lights");
+        v.Bool(spectralEnabled, d.spectralEnabled,
+            { "Enabled", "Adds up to three extra lights (bass/mid/treble), positioned near the field center and pulsing with that band's own level, alongside the single core light." });
+        v.Float(spectralHueBass, d.spectralHueBass, 0.0f, 360.0f, { "Hue: Bass", "Hue (degrees) of the bass light." });
+        v.Float(spectralHueMid, d.spectralHueMid, 0.0f, 360.0f, { "Hue: Mid", "Hue (degrees) of the mid light." });
+        v.Float(spectralHueTreble, d.spectralHueTreble, 0.0f, 360.0f, { "Hue: Treble", "Hue (degrees) of the treble light." });
+        v.Float(spectralRadius, d.spectralRadius, 0.0f, 10.0f, { "Radius", "Offset distance of each spectral light from the field center, world units." });
+        v.Float(spectralIntensity, d.spectralIntensity, 0.0f, 20.0f, { "Intensity", "Scales each band's [0,1] level to a light intensity comparable to the core light's own (see Lighting/Core Light Intensity)." });
+        v.Float(spectralSaturation, d.spectralSaturation, 0.0f, 1.0f, { "Saturation", "Saturation shared by all three spectral lights." });
+        v.EndGroup();
+
+        v.BeginGroup("Palette");
+        v.Enum(paletteMode, d.paletteMode, PaletteModeNames(), kPaletteModeCount,
+            { "Mode", "How a particle's world position maps to a ramp position between Hue A and Hue B -- Off leaves particles untinted (today's look)." });
+        v.Float(paletteHueA, d.paletteHueA, 0.0f, 360.0f, { "Hue A", "Ramp start hue (degrees)." });
+        v.Float(paletteHueB, d.paletteHueB, 0.0f, 360.0f, { "Hue B", "Ramp end hue (degrees)." });
+        v.Float(paletteSaturation, d.paletteSaturation, 0.0f, 1.0f, { "Saturation", "Palette tint saturation." });
+        v.Float(paletteStrength, d.paletteStrength, 0.0f, 1.0f,
+            { "Strength", "How strongly the tint mixes into particle albedo. Albedo is dim by design (see Emission's Color A/B) -- Light Tint below is what actually makes the palette read clearly." });
+        v.Float(paletteLightTint, d.paletteLightTint, 0.0f, 1.0f,
+            { "Light Tint", "How strongly the tint mixes into the light response each particle receives -- since lit intensity (3-9) dwarfs raw albedo (0.1-0.28), this is the primary lever for a visible palette." });
+        v.Float(paletteAudioShift, d.paletteAudioShift, 0.0f, 180.0f,
+            { "Shift x Energy", "Degrees the whole Hue A/B ramp rotates at full-scale EnergyLevel() -- the palette itself drifts with loudness." });
+        v.Float(paletteAudioSpread, d.paletteAudioSpread, 0.0f, 180.0f,
+            { "Spread x Treble", "Degrees Hue B widens away from Hue A at full-scale TrebleLevel() -- the ramp gets more colorful on bright/sparkly passages." });
         v.EndGroup();
     }
 };
@@ -466,12 +576,17 @@ struct PerformanceSettings {
 // pattern ApplyPerformanceSettings already uses for vsync/fps.
 // -----------------------------------------------------------------------
 struct AudioSettings {
-    bool enabled = false;
+    // On by default: this is a music visualizer, and the whole point --
+    // the transport bar, the reactive presets, every audio-driven force
+    // and light in FogAudioSettings/FogColorSettings -- is inert with
+    // audio off. Still a one-click toggle in the panel for a silent/
+    // screenshot session.
+    bool enabled = true;
     float volume = 0.6f;
 
     void Visit(IParamVisitor& v) {
         AudioSettings d;
-        v.Bool(enabled, d.enabled, { "Enabled", "Turns on the audio device, track playback, and every audio-reactive visual (lighting, turbulence, kick impulses). Off by default -- silent, no audio device initialized, exactly like a build with no audio support at all." });
+        v.Bool(enabled, d.enabled, { "Enabled", "Turns on the audio device, track playback, and every audio-reactive visual (lighting, turbulence, kick impulses). On by default -- this is a music visualizer." });
         v.Float(volume, d.volume, 0.0f, 1.0f, { "Volume", "Music playback volume." });
     }
 };

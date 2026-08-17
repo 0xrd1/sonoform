@@ -19,6 +19,15 @@ ParticleRenderer::ParticleRenderer(ShaderLibrary& shaders) {
     locTime_ = GetShaderLocation(shader_, "uTime");
     locSpriteStyle_ = GetShaderLocation(shader_, "uSpriteStyle");
 
+    locPaletteMode_ = GetShaderLocation(shader_, "uPaletteMode");
+    locPaletteCenter_ = GetShaderLocation(shader_, "uPaletteCenter");
+    locPaletteExtent_ = GetShaderLocation(shader_, "uPaletteExtent");
+    locPaletteHueA_ = GetShaderLocation(shader_, "uPaletteHueA");
+    locPaletteHueB_ = GetShaderLocation(shader_, "uPaletteHueB");
+    locPaletteSat_ = GetShaderLocation(shader_, "uPaletteSat");
+    locPaletteStrength_ = GetShaderLocation(shader_, "uPaletteStrength");
+    locPaletteLightTint_ = GetShaderLocation(shader_, "uPaletteLightTint");
+
     // No vertex buffer is ever bound -- particle_render.vert generates
     // every quad corner from gl_VertexID -- but core-profile GL still
     // requires *a* VAO bound to issue any draw call, so we keep one
@@ -33,7 +42,7 @@ ParticleRenderer::~ParticleRenderer() {
 
 void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
                              int fadeMode, float sizeScale, const LightSample* lights, int lightCount,
-                             float time, int spriteStyle) const {
+                             float time, int spriteStyle, const PaletteParams& palette) const {
     if (instanceCount <= 0) return;
 
     rlEnableShader(shader_.id);
@@ -45,6 +54,22 @@ void ParticleRenderer::Draw(int instanceCount, const Matrix& viewProj, Vector3 c
     if (locSizeScale_ != -1) SetShaderValue(shader_, locSizeScale_, &sizeScale, SHADER_UNIFORM_FLOAT);
     if (locTime_ != -1) SetShaderValue(shader_, locTime_, &time, SHADER_UNIFORM_FLOAT);
     if (locSpriteStyle_ != -1) SetShaderValue(shader_, locSpriteStyle_, &spriteStyle, SHADER_UNIFORM_INT);
+
+    // Always set explicitly (not gated behind "if palette.mode != Off"):
+    // this program is shared across every particle system's draw call
+    // (see uLightCount's identical reasoning above), so a visualizer that
+    // used a palette last frame must not leak it into the next draw that
+    // doesn't pass one -- PaletteParams{}'s Off/0-strength defaults are
+    // the correct "no palette" state to stamp every frame.
+    int paletteMode = static_cast<int>(palette.mode);
+    if (locPaletteMode_ != -1) SetShaderValue(shader_, locPaletteMode_, &paletteMode, SHADER_UNIFORM_INT);
+    if (locPaletteCenter_ != -1) SetShaderValue(shader_, locPaletteCenter_, &palette.center, SHADER_UNIFORM_VEC3);
+    if (locPaletteExtent_ != -1) SetShaderValue(shader_, locPaletteExtent_, &palette.extent, SHADER_UNIFORM_FLOAT);
+    if (locPaletteHueA_ != -1) SetShaderValue(shader_, locPaletteHueA_, &palette.hueA, SHADER_UNIFORM_FLOAT);
+    if (locPaletteHueB_ != -1) SetShaderValue(shader_, locPaletteHueB_, &palette.hueB, SHADER_UNIFORM_FLOAT);
+    if (locPaletteSat_ != -1) SetShaderValue(shader_, locPaletteSat_, &palette.saturation, SHADER_UNIFORM_FLOAT);
+    if (locPaletteStrength_ != -1) SetShaderValue(shader_, locPaletteStrength_, &palette.strength, SHADER_UNIFORM_FLOAT);
+    if (locPaletteLightTint_ != -1) SetShaderValue(shader_, locPaletteLightTint_, &palette.lightTint, SHADER_UNIFORM_FLOAT);
 
     int clampedCount = lightCount < 0 ? 0 : (lightCount > kMaxParticleLights ? kMaxParticleLights : lightCount);
     if (locLightCount_ != -1) SetShaderValue(shader_, locLightCount_, &clampedCount, SHADER_UNIFORM_INT);

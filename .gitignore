@@ -3,9 +3,14 @@ out/
 .cache/
 *.user
 assets/models/
+*.png
 
-# Runtime-generated settings-panel presets (see src/ui/SettingsIO.h). Lands
-# in build/ when running the built exe directly, or in the repo root when
-# run via the VS debugger (VS_DEBUGGER_WORKING_DIRECTORY = repo root) --
-# either way it's tuned-look data, not source.
+# Presets (src/ui/SettingsIO.h) now resolve to the repo-root presets/
+# directory regardless of launch method (see EngineUi.cpp's PresetsDir())
+# and are tracked, not ignored -- they're tuned looks worth keeping, the
+# same reasoning applies to the deliberately-hand-curated presets/ files
+# already in the repo. The old settings/ path (CWD-relative, so it split
+# into build/settings/ vs. <root>/settings/ depending on how the exe was
+# launched) is dead now that nothing writes there, but still ignored in
+# case a stray copy lingers on disk from before this change.
 settings/

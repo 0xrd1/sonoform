@@ -41,11 +41,6 @@ int VisualizerManager::CurrentParticleCount() const {
     return items_[static_cast<size_t>(index_)]->ParticleCount();
 }
 
-const char* VisualizerManager::CurrentExtraStatusLine() const {
-    if (items_.empty()) return nullptr;
-    return items_[static_cast<size_t>(index_)]->ExtraStatusLine();
-}
-
 const char* VisualizerManager::CurrentDebugInfoText() const {
     if (items_.empty()) return nullptr;
     return items_[static_cast<size_t>(index_)]->DebugInfoText();

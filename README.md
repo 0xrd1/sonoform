@@ -22,7 +22,7 @@ just a spectrum plot.
   1. **Neon Fog** — a dense, lit-from-within fog volume, a fraction of
      which is attracted onto an SDF shape field (`shapes/ShapeField` +
      `ProceduralShapeProvider`) via a `ShapeConform` force, cycling
-     through analytic primitives (sphere/box/torus/cylinder/head) so
+     through analytic primitives (sphere/box/torus/cylinder) so
      particles visibly migrate to each new shape. Shape attraction is
      driven by an independent `morphForce_` value (`-`/`=`), *not*
      audio; audio only drives the core light's color/intensity and
@@ -83,8 +83,7 @@ The built binary copies `assets/` next to itself automatically.
 
 | Key | Action |
 |---|---|
-| `1`-`5` | Jump to a specific visualizer (`1` = Neon Fog) |
-| `Tab` / `→` / `←` | Cycle visualizers |
+| `1`-`5` / `Tab` / `→` / `←` | Jump to / cycle visualizers (wired for the other four; only Neon Fog is currently registered — see `App::Init`) |
 | `Space` | Pause/resume |
 | `S` | Cycle shape preset (Neon Fog) |
 | `M` | Toggle shape auto-cycle on/off (Neon Fog) |
@@ -95,8 +94,14 @@ The built binary copies `assets/` next to itself automatically.
 | `R` | Reset camera |
 | `[` / `]` | Decrease / increase reactivity intensity (lighting only) |
 | `F` | Toggle fullscreen |
-| `H` | Toggle HUD |
+| `H` | Toggle the plain-text HUD (FPS/particle count) |
+| `F1` | Toggle the ImGui settings panel |
+| `F12` | Save a screenshot |
 | `Esc` | Quit |
+
+The bottom of the window also has an always-on playback transport (prev/
+play-pause/next, a scrubbable timeline, volume) independent of the HUD/panel
+above.
 
 ## Extending it
 

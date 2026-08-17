@@ -118,7 +118,8 @@ void ShapeFogEmitter::Update(float dt, float time, const ShapeField& field, floa
 }
 
 void ShapeFogEmitter::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
-                            const LightSample* lights, int lightCount, float time, int spriteStyle) const {
+                            const LightSample* lights, int lightCount, float time, int spriteStyle,
+                            const PaletteParams& palette) const {
     if (!system_) return;
     // fadeMode 2 (particle_render.vert's two-sided fade, in over the first
     // ~25% of life and out over the final ~17%) instead of 1 (instant-
@@ -126,7 +127,7 @@ void ShapeFogEmitter::Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 
     // snapped to full brightness the instant it existed, which read as a
     // visible "pop in" no matter how the lifecycle/spawn-rate was tuned.
     system_->Draw(viewProj, cameraRight, cameraUp, /*fadeMode=*/2, /*sizeScale=*/1.0f,
-                  lights, lightCount, time, spriteStyle);
+                  lights, lightCount, time, spriteStyle, palette);
 }
 
 void ShapeFogEmitter::EmitImpactBurst(Vector3 center) {

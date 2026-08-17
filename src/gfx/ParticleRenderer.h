@@ -1,6 +1,7 @@
 #pragma once
 #include "raylib.h"
 #include "LightSample.h"
+#include "PaletteParams.h"
 
 class ShaderLibrary;
 
@@ -30,9 +31,11 @@ public:
     // callers that don't track elapsed time. `spriteStyle`: 0 = clean
     // circular sprite, 1 (default) = noise-broken wispy look -- see
     // particle_render.frag's uSpriteStyle.
+    // `palette` defaults to PaletteMode::Off, an exact no-op against every
+    // call site that doesn't pass one -- see gfx/PaletteParams.h.
     void Draw(int instanceCount, const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
               int fadeMode, float sizeScale, const LightSample* lights = nullptr, int lightCount = 0,
-              float time = 0.0f, int spriteStyle = 1) const;
+              float time = 0.0f, int spriteStyle = 1, const PaletteParams& palette = PaletteParams{}) const;
 
 private:
     Shader shader_{};
@@ -48,4 +51,13 @@ private:
     int locLightCount_ = -1;
     int locTime_ = -1;
     int locSpriteStyle_ = -1;
+
+    int locPaletteMode_ = -1;
+    int locPaletteCenter_ = -1;
+    int locPaletteExtent_ = -1;
+    int locPaletteHueA_ = -1;
+    int locPaletteHueB_ = -1;
+    int locPaletteSat_ = -1;
+    int locPaletteStrength_ = -1;
+    int locPaletteLightTint_ = -1;
 };

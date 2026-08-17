@@ -52,7 +52,8 @@ public:
     // needed to vary per-call across this project's history, so they're
     // not exposed here; add parameters if a future emitter needs them.
     void Draw(const Matrix& viewProj, Vector3 cameraRight, Vector3 cameraUp,
-              const LightSample* lights, int lightCount, float time, int spriteStyle) const;
+              const LightSample* lights, int lightCount, float time, int spriteStyle,
+              const PaletteParams& palette = PaletteParams{}) const;
 
     int AliveCountApprox() const { return system_ ? system_->AliveCountApprox() : 0; }
 

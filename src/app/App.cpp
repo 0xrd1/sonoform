@@ -4,6 +4,7 @@
 #include "DemoTrack.h"
 #include "GlCompat.h"
 #include "EngineUi.h"
+#include "TransportBar.h"
 
 #include "SpectrumRingVisualizer.h"
 #include "GalaxyVisualizer.h"
@@ -112,7 +113,7 @@ bool App::Init(const std::string& audioPathArg) {
     ui::Setup();
 
     // Restore a previously saved look, if any -- a no-op on first run, when
-    // settings/default.ini doesn't exist yet (see ui::LoadDefaultSettings).
+    // presets/default.ini doesn't exist yet (see ui::LoadDefaultSettings).
     // Must come after visualizers_.Add() above, since it reads/writes the
     // current visualizer's settings via VisitSettings.
     {
@@ -232,6 +233,13 @@ void App::PlayTrack(int index) {
 void App::NextTrack() { PlayTrack(currentTrackIndex_ + 1); }
 void App::PrevTrack() { PlayTrack(currentTrackIndex_ - 1); }
 
+void App::SeekTo(float seconds) {
+    if (!musicLoaded_) return;
+    float target = Clamp(seconds, 0.0f, cachedDuration_);
+    std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+    SeekMusicStream(music_, target);
+}
+
 void App::ApplyAudioSettings() {
     if (audioSettings_.enabled != lastAudioEnabled_) {
         if (audioSettings_.enabled) {
@@ -298,31 +306,39 @@ void App::Run() {
         // while this loop is blocked inside an interactive window resize/
         // move on Windows.
 
+        // Single time-played/duration read per frame -- feeds both the
+        // auto-advance check right below and the transport bar (see
+        // DrawUi()'s TransportState wiring), replacing what used to be a
+        // second, separate read inside the auto-advance block alone.
+        if (musicLoaded_) {
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            cachedTimePlayed_ = GetMusicTimePlayed(music_);
+            cachedDuration_ = GetMusicTimeLength(music_);
+        } else {
+            cachedTimePlayed_ = 0.0f;
+            cachedDuration_ = 0.0f;
+        }
+
         // A real (non-procedural) playlist advances on its own once the
         // current track finishes -- see PlayTrack's looping comment for
         // why the procedural fallback doesn't need this (it loops in
-        // place). Checked under the same lock as every other music_ touch.
+        // place).
         if (audioSettings_.enabled && musicLoaded_ && !usingProceduralTrack_ && !paused_) {
-            bool trackEnded;
-            {
-                std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
-                float played = GetMusicTimePlayed(music_);
-                float length = GetMusicTimeLength(music_);
-                // `played > 1.0f` guards against a real, observed false-
-                // positive right after a fresh PlayTrack(): immediately
-                // after LoadMusicStream/PlayMusicStream, before the audio
-                // thread's next UpdateMusicStream tick has run even once,
-                // GetMusicTimeLength/GetMusicTimePlayed can transiently
-                // report a length near 0 (decoder duration not fully
-                // settled yet) -- without this guard that reads as
-                // "already finished" and immediately advances again,
-                // which is exactly what was observed: tracks skipping
-                // every couple of seconds instead of playing to the end.
-                // A real track is always playing for well over a second
-                // before it can legitimately end, so this costs nothing
-                // for genuine end-of-track detection.
-                trackEnded = length > 0.5f && played > 1.0f && played >= length - 0.05f;
-            }
+            // `played > 1.0f` guards against a real, observed false-
+            // positive right after a fresh PlayTrack(): immediately
+            // after LoadMusicStream/PlayMusicStream, before the audio
+            // thread's next UpdateMusicStream tick has run even once,
+            // GetMusicTimeLength/GetMusicTimePlayed can transiently
+            // report a length near 0 (decoder duration not fully
+            // settled yet) -- without this guard that reads as
+            // "already finished" and immediately advances again,
+            // which is exactly what was observed: tracks skipping
+            // every couple of seconds instead of playing to the end.
+            // A real track is always playing for well over a second
+            // before it can legitimately end, so this costs nothing
+            // for genuine end-of-track detection.
+            bool trackEnded = cachedDuration_ > 0.5f && cachedTimePlayed_ > 1.0f
+                             && cachedTimePlayed_ >= cachedDuration_ - 0.05f;
             if (trackEnded) NextTrack();
         }
 
@@ -395,6 +411,10 @@ void App::HandleInput(float dt) {
     }
     if (IsKeyPressed(KEY_F)) ToggleFullscreen();
     if (IsKeyPressed(KEY_H)) showHud_ = !showHud_;
+    // Preset-tuning aid: a quick way to capture a look without an external
+    // grabber, saved into the working directory with a millisecond
+    // timestamp so repeated presses never collide on one filename.
+    if (IsKeyPressed(KEY_F12)) TakeScreenshot(TextFormat("screenshot_%d.png", static_cast<int>(GetTime() * 1000.0)));
 
     if (IsKeyDown(KEY_LEFT_BRACKET)) postSettings_.reactivityIntensity -= dt * 0.6f;
     if (IsKeyDown(KEY_RIGHT_BRACKET)) postSettings_.reactivityIntensity += dt * 0.6f;
@@ -479,6 +499,37 @@ void App::Draw() {
 
     if (showHud_) DrawHUD();
 
+    // The application's own playback transport -- always drawn (not gated
+    // behind showHud_/showSettingsPanel_, both of which the user may well
+    // have hidden while still wanting to control playback) -- see
+    // ui/TransportBar.h. Built fresh each frame, same pattern DrawUi()
+    // already uses for ui::PanelState; every side effect that would touch
+    // Music is a callback into App, mirroring PanelState's own "no Music*
+    // crosses into the UI layer" rule (see EngineUi.h).
+    {
+        ui::TransportState transport;
+        transport.enabled = audioSettings_.enabled && musicLoaded_;
+        transport.paused = paused_;
+        transport.timePlayed = cachedTimePlayed_;
+        transport.duration = cachedDuration_;
+        transport.trackName = trackLabel_.c_str();
+        transport.trackIndex = currentTrackIndex_;
+        transport.trackCount = TrackCount();
+        transport.volume = audioSettings_.volume;
+        transport.onPrev = [this] { PrevTrack(); };
+        transport.onNext = [this] { NextTrack(); };
+        transport.onPausedChanged = [this](bool p) {
+            paused_ = p;
+            if (!musicLoaded_) return;
+            std::lock_guard<std::mutex> lock(audioThread_.MusicMutex());
+            if (paused_) PauseMusicStream(music_);
+            else ResumeMusicStream(music_);
+        };
+        transport.onSeek = [this](float seconds) { SeekTo(seconds); };
+        transport.onVolumeChanged = [this](float v) { audioSettings_.volume = v; };
+        ui::DrawTransportBar(transport);
+    }
+
     // Drawn last, outside PostProcess::BeginScene/EndScene: bloom only ever
     // reads sceneTarget_, which received everything drawn between those two
     // calls above, so the panel is neither bright-pass extracted nor
@@ -489,27 +540,21 @@ void App::Draw() {
     EndDrawing();
 }
 
+// Deliberately minimal -- FPS and Particles are the two numbers worth
+// seeing with the ImGui panel closed (F1); everything else this used to
+// duplicate (visualizer index, Intensity, Track, PAUSED) now has a better
+// home: ImGui's Engine Settings panel or the always-on transport bar (see
+// ui::DrawTransportBar) -- see the class comment on why keeping both was
+// redundant, and why the old 3-line keybind block had gone stale (it
+// advertised switching between five visualizers when only one is
+// registered -- see Init()'s comment).
 void App::DrawHUD() const {
     const int pad = 12;
     int y = pad;
 
     DrawText(TextFormat("FPS: %d", GetFPS()), pad, y, 18, GREEN); y += 22;
-    DrawText(TextFormat("Visualizer [%d/%d]: %s", visualizers_.CurrentIndex() + 1, visualizers_.Count(), visualizers_.CurrentName()),
-              pad, y, 18, RAYWHITE); y += 22;
     DrawText(TextFormat("Particles: %d", hudParticleCount_), pad, y, 18, RAYWHITE); y += 22;
-    DrawText(TextFormat("Intensity: %.2f", postSettings_.reactivityIntensity), pad, y, 18, RAYWHITE); y += 22;
-
-    const char* extra = visualizers_.CurrentExtraStatusLine();
-    if (extra != nullptr) { DrawText(extra, pad, y, 16, SKYBLUE); y += 20; }
-
-    DrawText(TextFormat("Track: %s", trackLabel_.c_str()), pad, y, 16, GRAY); y += 20;
-    if (paused_) { DrawText("PAUSED", pad, y, 18, YELLOW); y += 22; }
-
-    const char* controls =
-        "1-5: switch visualizer   Tab/Right/Left: cycle   Space: pause   S: cycle shape   M: toggle auto-cycle (Neon Fog)\n"
-        "Right-drag: orbit camera   Wheel: zoom   C: toggle auto-rotate   R: reset camera\n"
-        "[ / ]: light intensity   - / =: morph force (Neon Fog)   F: fullscreen   H: toggle HUD   F1: settings panel   Esc: quit";
-    DrawText(controls, pad, GetScreenHeight() - 70, 16, Fade(RAYWHITE, 0.75f));
+    DrawText("F1: settings panel   H: toggle HUD   F12: screenshot   Esc: quit", pad, y, 14, Fade(RAYWHITE, 0.6f));
 }
 
 void App::DrawUi() {

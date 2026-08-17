@@ -95,7 +95,7 @@ bool WantsMouse();
 // Draws the whole settings window: FPS/particle-count strip, Camera and
 // Post/Global groups, the current visualizer's own settings (via
 // Visualizer::VisitSettings), a Rebuild Systems button for any
-// NeedsRebuild field, and Save/Load preset controls under settings/.
+// NeedsRebuild field, and Save/Load preset controls under presets/.
 void DrawDebugPanel(PanelState& state);
 
 // Draws the separate "Debug View" window (in-scene gizmo toggles -- see
@@ -103,7 +103,7 @@ void DrawDebugPanel(PanelState& state);
 // the same way. A no-op if state.debug is null.
 void DrawDebugWindow(PanelState& state);
 
-// Loads settings/default.ini into `state`'s bound Camera/Post/current-
+// Loads presets/default.ini into `state`'s bound Camera/Post/current-
 // visualizer settings if that file exists. Called once by App::Init after
 // visualizers are registered; a no-op on first run, when no default has
 // been saved yet. Only state.visualizers/camera/post need to be set --

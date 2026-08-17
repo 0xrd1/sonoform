@@ -1,12 +1,26 @@
 #version 430
 
 #include "../common/particle_types.glsl"
+#include "../common/color.glsl"
 
 uniform mat4 uViewProj;
 uniform vec3 uCameraRight;
 uniform vec3 uCameraUp;
 uniform float uSizeScale;  // global size multiplier (e.g. half-res render target compensation)
 uniform int uFadeMode;     // 0 = linear, 1 = eased (min(1, ratio*1.5)), 2 = two-sided edge fade
+
+// Per-particle palette tint, sampled live from worldPos each frame -- see
+// gfx/PaletteParams.h for the full field-by-field rationale. uPaletteMode
+// matches the PaletteMode enum there (0=Off/1=Height/2=Radius/3=Angle/
+// 4=Random); Off must be an exact no-op against the untinted path below.
+uniform int uPaletteMode;
+uniform vec3 uPaletteCenter;
+uniform float uPaletteExtent;
+uniform float uPaletteHueA;   // degrees
+uniform float uPaletteHueB;   // degrees
+uniform float uPaletteSat;
+uniform float uPaletteStrength;
+uniform float uPaletteLightTint;
 
 // Point lights (e.g. active lightning bolts) that visibly brighten nearby
 // particles -- see gfx/LightSample.h. Explicitly set to uLightCount=0 by
@@ -40,6 +54,24 @@ float FadeCurve(float lifeRatio) {
     if (uFadeMode == 1) return min(1.0, lifeRatio * 1.5);
     if (uFadeMode == 2) return min(1.0, (1.0 - lifeRatio) * 4.0) * min(1.0, lifeRatio * 6.0);
     return lifeRatio;
+}
+
+// Maps worldPos to a [0,1] ramp position per PaletteMode (gfx/PaletteParams.h)
+// -- Height/Radius are normalized by uPaletteExtent so the ramp spans
+// whatever the shape's current scale actually is, not a fixed world size.
+float PaletteT(vec3 worldPos, float rngSeed) {
+    vec3 offset = worldPos - uPaletteCenter;
+    float extent = max(uPaletteExtent, 0.0001);
+    if (uPaletteMode == 1) { // Height
+        return clamp(offset.y / extent * 0.5 + 0.5, 0.0, 1.0);
+    } else if (uPaletteMode == 2) { // Radius
+        return clamp(length(offset) / extent, 0.0, 1.0);
+    } else if (uPaletteMode == 3) { // Angle
+        return atan(offset.z, offset.x) / (2.0 * 3.14159265) + 0.5;
+    } else if (uPaletteMode == 4) { // Random
+        return fract(rngSeed * 0.6180339887);
+    }
+    return 0.0;
 }
 
 void main() {
@@ -97,5 +129,21 @@ void main() {
     // own rng seed so neighboring particles don't show an identical
     // pattern (which would look like a tiled texture instead of fog).
     vSeedOffset = vec2(fract(p.params.y * 0.1031), fract(p.params.y * 0.2947)) * 37.0;
-    vColor = vec4(p.color.rgb * shade + lightBoost, p.color.a * FadeCurve(lifeRatio));
+
+    // Palette tint: a colored-medium model, not a paint job -- it mixes
+    // into albedo (dim, ~0.1-0.28 value) AND into the light response
+    // (lightBoost, intensity 3-9), because tinting albedo alone would be
+    // invisible next to how much brighter the light term already is. See
+    // gfx/PaletteParams.h. uPaletteMode == 0 (Off) takes uPaletteStrength
+    // and uPaletteLightTint's default-0 path, which is an exact no-op --
+    // both mix()es collapse to their first argument.
+    vec3 albedo = p.color.rgb;
+    if (uPaletteMode != 0) {
+        float t = PaletteT(worldPos, p.params.y);
+        vec3 tint = Hsv2Rgb(vec3(mix(uPaletteHueA, uPaletteHueB, t) / 360.0, uPaletteSat, 1.0));
+        albedo = mix(albedo, albedo * tint, uPaletteStrength);
+        lightBoost = mix(lightBoost, lightBoost * tint, uPaletteLightTint);
+    }
+
+    vColor = vec4(albedo * shade + lightBoost, p.color.a * FadeCurve(lifeRatio));
 }

@@ -24,7 +24,6 @@ public:
 
 private:
     void HandleInput(float dt);
-    void Update(float dt);
     void Draw();
     void DrawHUD() const;
     void DrawUi(); // the ImGui settings panel -- see src/ui/EngineUi.h; non-const, unlike DrawHUD
@@ -53,6 +52,12 @@ private:
     void PlayTrack(int index);
     void NextTrack();
     void PrevTrack();
+
+    // Seeks the current stream to `seconds`, clamped to [0, cachedDuration_]
+    // -- the transport bar's scrub target (see ui::TransportBar.h's onSeek).
+    // Same mutex discipline as PlayTrack et al.; a no-op if nothing is
+    // loaded.
+    void SeekTo(float seconds);
 
     // Applies audioSettings_ to actual device/playback state, but only on
     // an actual change (mirrors ApplyPerformanceSettings' own comment on
@@ -86,6 +91,13 @@ private:
     std::vector<std::string> trackDisplayNames_; // parallel to trackPaths_ (or a single "Procedural Demo Track" entry) -- what the transport UI actually shows, see TrackDisplayName
     int currentTrackIndex_ = 0;
     bool trackListScanned_ = false;
+
+    // Single per-frame GetMusicTimePlayed/GetMusicTimeLength read (see
+    // Run()), feeding both the auto-advance check and the transport bar --
+    // replaces what used to be a duplicate read inside the auto-advance
+    // block alone. 0 while nothing is loaded.
+    float cachedTimePlayed_ = 0.0f;
+    float cachedDuration_ = 0.0f;
 
     AudioAnalyzer analyzer_;
     AudioThread audioThread_;
