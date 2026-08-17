@@ -21,11 +21,21 @@
 // solid blob and reads as a rigid point cloud -- exactly what the VFX
 // technique in the module comment above is meant to avoid. Recruiting only
 // a subset keeps the rest as permanent ambient fog, so the shape is always
-// suggested by a portion of the particles, never all of them. Only a
+// suggested by a portion of the particles, never all of them. a.x = volume
+// depth, a.y = flow noise scale (see their parameters below). Only a
 // ForceDesc of type FORCE_SHAPE_CONFORM invokes this (see forces.glsl);
 // other particle systems never call it and never touch the ShapeField
 // buffer.
-vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, float morphStrength, float recruitFraction, float time, float particleSeed) {
+//
+// volumeDepth: 0 means every recruited particle targets the exact
+// zero-surface (dist == 0) -- a hollow lit skin. >0 means each particle
+// instead targets its own fixed, randomly-chosen depth inside the shape
+// (derived from its seed the same stable way recruitment is, so it never
+// changes for that particle's life), spreading the recruited population
+// across many nested iso-surfaces so it fills the body instead of
+// collapsing onto one shell -- a continuous surface-to-volume control,
+// not a separate mode.
+vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, float morphStrength, float recruitFraction, float volumeDepth, float flowNoiseScale, float time, float particleSeed) {
     if (morphStrength <= 0.0001) return vec3(0.0);
 
     // Deterministic per-particle recruitment from the particle's own rng
@@ -40,19 +50,37 @@ vec3 ApplyShapeConform(vec3 pos, float attractionStrength, float curlStrength, f
     vec3 gradient = fieldSample.xyz;
     float dist = fieldSample.w;
 
-    // Pull toward the surface: outside (dist>0) pulls inward along
-    // -gradient, inside (dist<0) pushes outward along +gradient. A small
-    // deadband near the surface keeps particles hovering/orbiting it
+    // Target iso-surface: dist == 0 (the true surface) when volumeDepth
+    // is 0, or this particle's own fixed depth inside the shape
+    // otherwise -- see volumeDepth's comment above. A different hash
+    // constant than RecruitRoll's so the two rolls are decorrelated (a
+    // particle's recruitment and its depth-within-the-volume shouldn't
+    // move together).
+    float depthRoll = fract(particleSeed * 0.7548776662);
+    float targetDist = -volumeDepth * depthRoll;
+    float distFromTarget = dist - targetDist;
+
+    // Pull toward the target: on the far side pulls inward along
+    // -gradient, on the near side pushes outward along +gradient. A small
+    // deadband near the target keeps particles hovering/orbiting it
     // instead of pinning exactly onto it (which would look like a solid
     // shell, not fog) -- kept tight so correction engages almost
     // immediately instead of letting a particle drift noticeably before
     // attraction does anything, which read as "not holding the shape."
-    float pull = clamp(abs(dist) - 0.05, 0.0, 4.0);
-    vec3 attraction = -sign(dist) * gradient * pull * attractionStrength;
+    float pull = clamp(abs(distFromTarget) - 0.05, 0.0, 4.0);
+    vec3 attraction = -sign(distFromTarget) * gradient * pull * attractionStrength;
 
-    // Surface-parallel flow.
-    float n = ValueNoise3D(pos * 0.6 + vec3(0.0, 0.0, time * 0.15));
-    vec3 flow = CurlNoise3D(gradient * n * 3.0, time * 0.2) * curlStrength;
+    // Surface-parallel flow: sampled at the particle's own world position
+    // (not, as an earlier version did, at a point built from the local
+    // surface *normal* -- gradient is nearly identical for every particle
+    // sharing the same face/region of the shape, so that version made
+    // nearby particles sample nearly the same point in noise-space and
+    // inherit nearly identical flow vectors, herding them into shared
+    // streamlines instead of dispersing independently, which read as
+    // wavy-line/vein clumping). Projected to be tangential to the local
+    // surface so it doesn't fight `attraction` above.
+    vec3 flow = CurlNoise3D(pos * flowNoiseScale + vec3(0.0, 0.0, time * 0.15), time * 0.2) * curlStrength;
+    flow -= gradient * dot(flow, gradient);
 
     return (attraction + flow) * morphStrength;
 }

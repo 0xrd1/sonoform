@@ -23,7 +23,8 @@ void NeonFogVisualizer::Init(ShaderLibrary& shaders, ParticleRenderer& renderer)
     turbulenceForceIndex_ = fog_->AddForce(gpu_force::Turbulence(forceSettings_.turbulenceStrength, forceSettings_.turbulenceScale));
     dragForceIndex_ = fog_->AddForce(gpu_force::Drag(forceSettings_.dragCoefficient));
     shapeConformForceIndex_ = fog_->AddForce(
-        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, 0.0f, shapeSettings_.recruitFraction));
+        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, 0.0f, shapeSettings_.recruitFraction,
+                                 shapeSettings_.volumeDepth, forceSettings_.flowNoiseScale));
 
     // Fake self-shadow shading direction matches the overhead key light's
     // actual angle, so the floor's light pool (gfx/VoidFloor) and the
@@ -62,7 +63,8 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     morphStrength_ += (morphTarget - morphStrength_) * std::min(1.0f, frame.dt * shapeSettings_.morphEaseRate);
 
     fog_->SetForce(shapeConformForceIndex_,
-        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, morphStrength_, shapeSettings_.recruitFraction));
+        gpu_force::ShapeConform(forceSettings_.shapeAttraction, forceSettings_.shapeCurl, morphStrength_, shapeSettings_.recruitFraction,
+                                 shapeSettings_.volumeDepth, forceSettings_.flowNoiseScale));
 
     // Forces are re-pushed every frame so panel edits apply live -- see
     // ui::FogForceSettings.
@@ -107,7 +109,8 @@ void NeonFogVisualizer::Update(const FrameContext& frame) {
     // the cool cyan-blue family (Tron Legacy palette, not the earlier
     // violet).
     float coreHue = lightingSettings_.coreHueBase + frame.audio.Bass() * lightingSettings_.coreHueBassScale +
-                     frame.audio.Treble() * lightingSettings_.coreHueTrebleScale;
+                     frame.audio.Treble() * lightingSettings_.coreHueTrebleScale +
+                     frame.time * lightingSettings_.hueCycleSpeed;
     coreLightColor_ = ColorFromHSV(std::fmod(coreHue + 360.0f, 360.0f), lightingSettings_.coreSaturation, lightingSettings_.coreValue);
     coreLightIntensity_ = (lightingSettings_.intensityBase + frame.audio.Energy() * lightingSettings_.intensityEnergyScale +
                             beatFlash_ * lightingSettings_.intensityBeatFlashScale) * frame.intensity;

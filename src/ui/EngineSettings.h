@@ -86,6 +86,7 @@ struct FogForceSettings {
     float dragCoefficient = 1.0f;
     float shapeAttraction = 1.8f;
     float shapeCurl = 0.3f;
+    float flowNoiseScale = 0.35f;
 
     void Visit(IParamVisitor& v) {
         FogForceSettings d;
@@ -103,6 +104,8 @@ struct FogForceSettings {
             { "Shape Attraction", "How hard particles are pulled onto the current ShapeField surface. Particles already spawn on-surface, so this mostly maintains position against turbulence/gravity and pulls survivors to a new shape on morph." });
         v.Float(shapeCurl, d.shapeCurl, 0.0f, 3.0f,
             { "Shape Curl", "Tangential flow-around-the-surface strength, layered on top of Shape Attraction so particles slide across the shape rather than snapping straight to it." });
+        v.Float(flowNoiseScale, d.flowNoiseScale, 0.02f, 2.0f,
+            { "Flow Noise Scale", "Spatial frequency of Shape Curl's noise, sampled at each particle's own position. Smaller = broader/slower swirls; larger = busier/finer ones." });
     }
 };
 
@@ -119,11 +122,16 @@ struct ShapeSettings {
 
     int shapeType = 0;                  // indexes ProceduralShapeType; see ShapeTypeNames() below
     bool autoCycle = true;
-    float cycleSeconds = 6.0f;
+    float cycleSeconds = 15.0f;         // long enough to actually take in a shape's form before it changes
 
     float candidateHalfExtent = 3.5f;   // spawn candidate box half-extent, projected onto the field
     float shellThickness = 0.2f;        // +/- offset along the surface normal after projection
     float recruitFraction = 0.85f;      // fraction that gets Core Life (vs. Shed Life) and stays locked to the shape
+    // 0 = every recruited particle targets the exact shape surface (a hollow
+    // lit skin). >0 = each spreads across nested iso-surfaces down to this
+    // depth instead (a solid glowing body) -- see ApplyShapeConform in
+    // shapes/shape_conform.glsl. One continuous surface<->volume control.
+    float volumeDepth = 0.0f;
 
     float morphForce = 1.0f;            // independent driver, also nudged live via '-'/'='
     float morphMax = 1.5f;
@@ -151,6 +159,8 @@ struct ShapeSettings {
         v.Float(shellThickness, d.shellThickness, 0.0f, 2.0f, { "Shell Thickness", "Random offset along the surface normal after projection, so the birth shell isn't a razor-thin surface." });
         v.Float(recruitFraction, d.recruitFraction, 0.0f, 1.0f,
             { "Recruit Fraction", "Fraction of new particles that get Core Life and stay locked to the shape (vs. Shed Life haze). High = the volume reads as one coherent mass." });
+        v.Float(volumeDepth, d.volumeDepth, 0.0f, 4.0f,
+            { "Volume Depth", "0 = particles hug the exact surface (a hollow lit skin). Raise it and they instead spread across nested depths inside the shape (a solid glowing body) -- a continuous surface<->volume control, not a fixed toggle." });
         v.Float(morphForce, d.morphForce, 0.0f, morphMax,
             { "Morph Force", "Independent driver for shape attraction, deliberately not derived from audio -- 0 dissolves all structure back into ambient fog. Also nudged by '-'/'='." });
         v.Float(morphMax, d.morphMax, 0.5f, 3.0f, { "Morph Force Max", "Upper clamp on Morph Force." });
@@ -167,6 +177,7 @@ struct FogLightingSettings {
     float coreHueBase = 200.0f;
     float coreHueBassScale = -15.0f;
     float coreHueTrebleScale = 20.0f;
+    float hueCycleSpeed = 8.0f;         // degrees/sec of continuous drift; a full 360 deg cycle every 45s
     float coreSaturation = 0.75f;
     float coreValue = 1.0f;
 
@@ -184,6 +195,7 @@ struct FogLightingSettings {
         v.Float(coreHueBase, d.coreHueBase, 0.0f, 360.0f, { "Hue Base", "Core light hue (degrees) at rest." });
         v.Float(coreHueBassScale, d.coreHueBassScale, -60.0f, 60.0f, { "Hue x Bass", "Hue shift per unit of bass energy." });
         v.Float(coreHueTrebleScale, d.coreHueTrebleScale, -60.0f, 60.0f, { "Hue x Treble", "Hue shift per unit of treble energy." });
+        v.Float(hueCycleSpeed, d.hueCycleSpeed, 0.0f, 90.0f, { "Hue Cycle Speed", "Continuous hue drift, degrees/sec -- slow ambient color cycling. 0 disables it." });
         v.Float(coreSaturation, d.coreSaturation, 0.0f, 1.0f, { "Saturation", "Core light saturation. Lower reads as white-hot; higher as vividly colored." });
         v.Float(coreValue, d.coreValue, 0.0f, 1.0f, { "Value", "Core light HSV value." });
         v.EndGroup();

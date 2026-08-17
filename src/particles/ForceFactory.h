@@ -48,9 +48,11 @@ inline GpuForceDesc Directional(Vector3 direction, float strength) {
 }
 
 inline GpuForceDesc ShapeConform(float attractionStrength, float curlStrength, float morphStrength,
-                                  float recruitFraction = 0.35f) {
+                                  float recruitFraction = 0.35f, float volumeDepth = 0.0f,
+                                  float flowNoiseScale = 0.35f) {
     GpuForceDesc f;
     f.typeAndParams = { static_cast<float>(GpuForceType::ShapeConform), 0, 0, 0 };
+    f.a = { volumeDepth, flowNoiseScale, 0, 0 };
     f.b = { attractionStrength, curlStrength, morphStrength, recruitFraction };
     return f;
 }
