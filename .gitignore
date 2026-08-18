@@ -3,6 +3,7 @@ out/
 .cache/
 *.user
 assets/models/
+assets/audio/
 *.png
 
 # Presets (src/ui/SettingsIO.h) now resolve to the repo-root presets/
