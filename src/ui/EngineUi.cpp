@@ -15,27 +15,47 @@ namespace ui {
 
 namespace {
 
-// Repo-root, not "settings/" -- presets are tuned looks worth keeping and
-// sharing, not machine-local runtime state (contrast PerformanceSettings/
-// AudioSettings just above, which stay out of the round-trip entirely for
-// the opposite reason).
+// assets/presets, not "settings/" -- presets are tuned looks worth keeping
+// and shipping with the build, not machine-local runtime state (contrast
+// PerformanceSettings/AudioSettings just above, which stay out of the
+// round-trip entirely for the opposite reason).
 //
 // Resolved from GetApplicationDirectory() (the executable's own directory)
 // rather than a CWD-relative literal: the old "settings/presets" path had
 // exactly this problem (documented in the pre-existing settings/ .gitignore
-// comment) -- CWD is build/ when the built exe is launched directly, but
-// the repo root under the VS debugger (VS_DEBUGGER_WORKING_DIRECTORY, see
-// CMakeLists.txt), so a CWD-relative path silently split into two
-// divergent preset directories depending on how you ran it. The build
-// output always sits one level under the repo root (CMakeLists.txt's
-// add_executable target lands at <root>/build/<exe>), so
-// GetApplicationDirectory() + "../presets" reaches the one repo-tracked
-// presets/ directory regardless of launch method. Cached in a static local
-// -- ListPresets() re-scans this path every frame the panel is open (see
-// its own call site below), so this avoids a GetApplicationDirectory() call
-// on every one of those frames too.
+// comment) -- CWD is build/<config>/ when the built exe is launched
+// directly, but the repo root under the VS debugger
+// (VS_DEBUGGER_WORKING_DIRECTORY, see CMakeLists.txt), so a CWD-relative
+// path silently split into two divergent preset directories depending on
+// how you ran it.
+//
+// This used to instead reach back into the source tree with
+// GetApplicationDirectory() + "../presets", on the assumption the build
+// output always sits exactly one level under the repo root. That's true
+// for a single-config generator (Ninja, Makefiles) but false for the
+// Visual Studio generator actually used to build this on Windows, which is
+// multi-config and puts the exe at <root>/build/Release/<exe>, one level
+// deeper -- so the old path resolved to build/presets, which never
+// existed, and ListPresets() (see SettingsIO.cpp) failed silently on a
+// missing directory, empty list, no error. It's also wrong for any build
+// that isn't a dev checkout in the first place: a downloaded Release
+// build has no sibling source tree to reach into at all.
+//
+// So presets now ship the same way assets/ already does: CMakeLists.txt's
+// POST_BUILD step copies the repo-root presets/ into assets/presets/ next
+// to the executable, and this just points at that shipped copy. The
+// tradeoff worth knowing: presets are also *written* here (Save As, see
+// the call sites below), so a preset tuned by running the built exe lands
+// in the build-tree assets/presets/, and the next build's copy step
+// overwrites it from the repo-root source again. Tuning that's worth
+// keeping needs to be copied back into the repo-root presets/ by hand
+// before rebuilding.
+//
+// Cached in a static local -- ListPresets() re-scans this path every frame
+// the panel is open (see its own call site below), so this avoids a
+// GetApplicationDirectory() call on every one of those frames too.
 const std::string& PresetsDir() {
-    static const std::string dir = std::string(GetApplicationDirectory()) + "../presets";
+    static const std::string dir = std::string(GetApplicationDirectory()) + "assets/presets";
     return dir;
 }
 const std::string& DefaultPresetPath() {

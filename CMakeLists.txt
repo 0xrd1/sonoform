@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ParticleAudioEngine CXX)
+project(Sonoform CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -121,9 +121,9 @@ endif()
 
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
-add_executable(ParticleAudioEngine ${ENGINE_SOURCES})
+add_executable(Sonoform ${ENGINE_SOURCES})
 
-target_include_directories(ParticleAudioEngine PRIVATE
+target_include_directories(Sonoform PRIVATE
     src
     src/app
     src/core
@@ -136,21 +136,36 @@ target_include_directories(ParticleAudioEngine PRIVATE
     src/ui
 )
 
-target_link_libraries(ParticleAudioEngine PRIVATE raylib imgui)
+target_link_libraries(Sonoform PRIVATE raylib imgui)
 
 if(APPLE)
-    target_link_libraries(ParticleAudioEngine PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+    target_link_libraries(Sonoform PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+endif()
+
+# WinHTTP backs align::FetchSyncedLyrics (src/audio/align/LrcLibClient.cpp)
+# -- the LRCLIB lyrics lookup for real-word lipsync. System-provided on
+# every Windows install, no new dependency to fetch/vendor.
+if(WIN32)
+    target_link_libraries(Sonoform PRIVATE winhttp)
 endif()
 
 if(MSVC)
-    target_compile_options(ParticleAudioEngine PRIVATE /W4 /permissive-)
-    set_property(TARGET ParticleAudioEngine PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    target_compile_options(Sonoform PRIVATE /W4 /permissive-)
+    set_property(TARGET Sonoform PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
-    target_compile_options(ParticleAudioEngine PRIVATE -Wall -Wextra)
+    target_compile_options(Sonoform PRIVATE -Wall -Wextra)
 endif()
 
 # Keep assets next to the built executable so relative paths (assets/audio/...) resolve.
-add_custom_command(TARGET ParticleAudioEngine POST_BUILD
+add_custom_command(TARGET Sonoform POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:ParticleAudioEngine>/assets"
+            "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:Sonoform>/assets"
+)
+
+# Ship the repo-root presets/ alongside the executable, under assets/, the
+# same way assets/ itself ships -- see PresetsDir() in src/ui/EngineUi.cpp
+# for why it looks there instead of reaching back into the source tree.
+add_custom_command(TARGET Sonoform POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/presets" "$<TARGET_FILE_DIR:Sonoform>/assets/presets"
 )

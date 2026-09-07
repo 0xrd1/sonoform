@@ -1,4 +1,4 @@
-# Particle Audio Engine
+# Sonoform Visualizer
 
 A small C++17 graphics engine built on [raylib](https://www.raylib.com/) that
 drives real-time particle physics simulations from live audio analysis —
@@ -17,32 +17,18 @@ just a spectrum plot.
   based, O(1) emit/kill) driven by a stack of composable `IForce`s:
   gravity wells, drag, vortices, curl-noise turbulence, and constant
   directional forces (`particles/Forces`).
-- **`visualizers/`** contains five independent scenes that wire audio
-  features to particle emission and force parameters:
-  1. **Neon Fog** — a dense, lit-from-within fog volume, a fraction of
-     which is attracted onto an SDF shape field (`shapes/ShapeField` +
-     `ProceduralShapeProvider`) via a `ShapeConform` force, cycling
-     through analytic primitives (sphere/box/torus/cylinder) so
-     particles visibly migrate to each new shape. Shape attraction is
-     driven by an independent `morphForce_` value (`-`/`=`), *not*
-     audio; audio only drives the core light's color/intensity and
-     triggers lightning. See the class comment in
-     `visualizers/NeonFogVisualizer.h` for the full design rationale,
-     including the extension point for a future mesh-driven shape
-     (`assets/models/` has test meshes but nothing loads them yet).
-  2. **Spectrum Ring** — a circular bar-graph EQ that shoots sparks off
-     each bar, with gravity/drag on the sparks and an expanding pulse
-     ring on every beat.
-  3. **Particle Galaxy** — a central gravity well with continuously
-     spawned particles kicked into orbit; bass strengthens gravity,
-     treble adds turbulence, beats punch particles outward.
-  4. **Fireworks** — beats launch shells that arc and explode into
-     radial bursts under gravity + drag.
-  5. **Audio Tunnel** — a particle tunnel flying toward the camera,
-     radius modulated per-angle by the spectrum, color cycling and
-     flashing on beats.
-- **`app/App`** owns the window, camera (orbit/zoom via mouse), audio
-  playback, and switches between visualizers.
+- **`visualizers/`** contains **Neon Fog** — a dense, lit-from-within fog
+  volume, a fraction of which is attracted onto an SDF shape field
+  (`shapes/ShapeField` + `ProceduralShapeProvider`) via a `ShapeConform`
+  force, cycling through analytic primitives (sphere/box/torus/cylinder) so
+  particles visibly migrate to each new shape. Shape attraction is driven
+  by an independent `morphForce_` value (`-`/`=`), *not* audio; audio only
+  drives the core light's color/intensity and triggers lightning. See the
+  class comment in `visualizers/NeonFogVisualizer.h` for the full design
+  rationale, including the extension point for a future mesh-driven shape
+  (`assets/models/` has test meshes but nothing loads them yet).
+- **`app/App`** owns the window, camera (orbit/zoom via mouse), and audio
+  playback.
 
 No external assets are required: particle sprites are a procedurally
 generated radial-gradient texture, and if `assets/audio/` is empty the
@@ -73,17 +59,16 @@ The built binary copies `assets/` next to itself automatically.
 
 ```sh
 # Use your own track
-./build/ParticleAudioEngine path/to/song.mp3
+./build/Sonoform path/to/song.mp3
 
 # Or just drop a file into assets/audio/ and run with no args
-./build/ParticleAudioEngine
+./build/Sonoform
 ```
 
 ## Controls
 
 | Key | Action |
 |---|---|
-| `1`-`5` / `Tab` / `→` / `←` | Jump to / cycle visualizers (wired for the other four; only Neon Fog is currently registered — see `App::Init`) |
 | `Space` | Pause/resume |
 | `S` | Cycle shape preset (Neon Fog) |
 | `M` | Toggle shape auto-cycle on/off (Neon Fog) |
